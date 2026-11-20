@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Flet / Flutter 打包產物
+build/
+src/dist/
+dist/
+.flet/
+
+# 編輯器與系統
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 祕密資訊（API 金鑰等）絕對不要上傳
+.env

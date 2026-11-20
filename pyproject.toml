@@ -1,0 +1,18 @@
+[project]
+name = "ntu-meal-picker"
+version = "0.1.0"
+description = "台大吃什麼：校園三餐決策助手"
+requires-python = ">=3.10"
+dependencies = [
+  "flet",
+  "pillow",
+]
+
+[dependency-groups]
+dev = [
+  "pytest",
+]
+
+[tool.flet]
+product = "台大吃什麼"
+org = "tw.edu.ntu.student"

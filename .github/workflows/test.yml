@@ -1,0 +1,20 @@
+# 每次 push 或開 Pull Request，GitHub 會自動跑測試，失敗會顯示紅色叉叉
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      - run: pytest -q
+      - name: 檢查推薦邏輯能實際執行
+        run: cd src && python demo_cli.py
