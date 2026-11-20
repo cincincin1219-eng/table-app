@@ -1,0 +1,48 @@
+# 每次推到 main，GitHub 會自動把 App 打包成網站，發佈到
+#   https://cincincin1219-eng.github.io/table-app/
+# 參考 Flet 官方文件：https://flet.dev/docs/publish/web/static-website/hosting/github-pages
+name: pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:   # 也可以在 GitHub 網頁的 Actions 分頁手動按「Run workflow」
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同一時間只跑一次發佈；新的推送不會中斷正在發佈的那次
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  FLET_CLI_NO_RICH_OUTPUT: "1"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      # 版本跟本機一致（flet 1.1.2、pillow 13.0.0），升級本機時這裡也要一起改
+      - run: pip install "flet==1.1.2" "flet-cli==1.1.2" "flet-web==1.1.2" "flet-platform-assets==1.1.2" "pillow==13.0.0"
+      # 輸出會在 src/dist（Flet 以 src/main.py 所在資料夾為準）
+      - run: flet publish src/main.py -a assets --distpath dist --base-url /table-app/ --route-url-strategy hash
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: src/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
