@@ -59,6 +59,7 @@ MAX_W = 440             # 電腦上看時，畫面最寬 440
 ASSETS = Path(__file__).parent / "assets"
 SERIF_FILE = ASSETS / "fonts" / "NotoSerifTC-Medium.otf"
 LOGO_FILE = ASSETS / "fonts" / "Logo-Italic.ttf"
+PACKAGE_FONTS = Path(__file__).parent / "core" / "fonts"
 
 TAIPEI = timezone(timedelta(hours=8))   # 台灣沒有日光節約時間，固定 UTC+8
 KEY_ENTRIES = "ntu_meal.entries"
@@ -181,17 +182,17 @@ def demo_posts(now: datetime) -> list[Post]:
         Post("demo-a", "安安", "安", now - timedelta(days=1, hours=2), "小島酒室", "大安區",
              ["自然酒", "季節料理"], "炭烤白蘆筍配發酵奶油，酸度剛剛好。適合一個人坐吧台，慢慢喝完一杯。\n"
              "店主推薦的橘酒很乾淨，不搶味道。最後用酸種麵包把盤子上的奶油抹乾淨。",
-             "/demo/feed_wine.jpg", ["/demo/detail_bread.jpg"], price=0, party=1, demo=True,
+             "demo/feed_wine.jpg", ["demo/detail_bread.jpg"], price=0, party=1, demo=True,
              quote="好的小店，會讓你想一個人再來一次。",
              dishes=[("炭烤白蘆筍", "發酵奶油"), ("酸種麵包", "可續"), ("橘酒一杯", "店主推薦")],
              cheered_by=["小魚", "Leo"]),
         Post("demo-b", "小魚", "魚", now - timedelta(days=2, hours=1), "冬至食堂", "中正區",
              ["定食", "一人食"], "味噌湯是今晚的主角。下雨天，這裡的燈很溫柔。",
-             "/demo/feed_teishoku.jpg", price=0, party=1, demo=True,
+             "demo/feed_teishoku.jpg", price=0, party=1, demo=True,
              dishes=[("鹽烤鯖魚定食", "附味噌湯"), ("玉子燒", "")], cheered_by=["安安"]),
         Post("demo-c", "Leo", "L", now - timedelta(days=3, hours=-3), "巷尾麵舖", "公館",
              ["手打麵", "宵夜"], "清湯，麵條很有嚼勁。十點過後的公館，只剩這一盞燈還亮著。",
-             "/demo/feed_noodle.jpg", price=0, party=2, demo=True,
+             "demo/feed_noodle.jpg", price=0, party=2, demo=True,
              dishes=[("清湯手打麵", "加蛋"), ("燙青菜", "")]),
     ]
 
@@ -326,11 +327,14 @@ async def main(page: ft.Page, cloud=None):
     page.theme_mode = ft.ThemeMode.LIGHT
     page.theme = ft.Theme(color_scheme_seed=INK)
 
+    # 路徑不加開頭的「/」：網站放在子路徑（例如 GitHub Pages 的 /table-app/）時，
+    # "/fonts/…" 會指到網域根目錄而 404；"fonts/…" 會跟著網站所在的位置走。
+    # 網頁版的 Python 讀不到 assets/，所以也檢查 core/fonts/ 裡的那份（get_font.py 會複製）。
     fonts = {}
-    if SERIF_FILE.exists():
-        fonts["Serif"] = "/fonts/" + SERIF_FILE.name
-    if LOGO_FILE.exists():
-        fonts["Logo"] = "/fonts/" + LOGO_FILE.name
+    if SERIF_FILE.exists() or (PACKAGE_FONTS / SERIF_FILE.name).exists():
+        fonts["Serif"] = "fonts/" + SERIF_FILE.name
+    if LOGO_FILE.exists() or (PACKAGE_FONTS / LOGO_FILE.name).exists():
+        fonts["Logo"] = "fonts/" + LOGO_FILE.name
     if fonts:
         page.fonts = fonts
     # 沒下載字體時：Mac 桌面版用內建的「宋體」，網頁版用預設字體
