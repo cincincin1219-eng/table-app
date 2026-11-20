@@ -33,7 +33,7 @@ jobs:
       - run: pip install "flet==1.1.2" "flet-cli==1.1.2" "flet-web==1.1.2" "flet-platform-assets==1.1.2" "pillow==13.0.0"
       # 輸出會在 src/dist（Flet 以 src/main.py 所在資料夾為準）
       - run: flet publish src/main.py -a assets --distpath dist --base-url /table-app/ --route-url-strategy hash
-      - uses: actions/upload-pages-artifact@v4
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: src/dist
 
@@ -45,4 +45,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

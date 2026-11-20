@@ -12,4 +12,4 @@ SUPABASE_URL = "https://giwuvndulfkfodbfrfyu.supabase.co"
 SUPABASE_ANON_KEY = "sb_publishable_WF3Me6b9IH3iAaoMuBPdUg__q8cwkV7"
 
 # 網站公開網址（分享到 Threads 時會附上）
-SITE_URL = "https://elaborate-platypus-213a26.netlify.app"
+SITE_URL = "https://cincincin1219-eng.github.io/table-app/"
