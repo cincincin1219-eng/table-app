@@ -13,7 +13,7 @@ import urllib.request
 from pathlib import Path
 
 FONTS = Path(__file__).resolve().parent.parent / "src" / "assets" / "fonts"      # 介面用
-PACKAGE_FONTS = Path(__file__).resolve().parent.parent / "src" / "core" / "fonts"  # 每月 Dump 圖用（網頁版需要）
+PACKAGE_FONTS = Path(__file__).resolve().parent.parent / "src" / "core" / "fonts"  # Logo 字體（網頁版回顧圖用）
 TARGETS = [
     ("NotoSerifTC-Medium.otf", "思源宋體 Noto Serif TC（約 8 MB）", [
         "https://github.com/notofonts/noto-cjk/raw/main/Serif/SubsetOTF/TC/NotoSerifTC-Medium.otf",
@@ -52,6 +52,8 @@ def main():
     ok = all([download(*t) for t in TARGETS])
     PACKAGE_FONTS.mkdir(parents=True, exist_ok=True)
     for name, _, _ in TARGETS:
+        if name == "NotoSerifTC-Medium.otf":     # 太大，不打包進網頁版；網頁版會從網站的 fonts/ 下載
+            continue
         if (FONTS / name).exists():
             shutil.copy2(FONTS / name, PACKAGE_FONTS / name)
     print("\n重新執行 flet run --web src/main.py 就會套用。" if ok else "\n有字體沒下載成功，App 仍然可以用。")

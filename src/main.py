@@ -36,7 +36,8 @@ from core.recommend import explain_empty, recommend, surprise
 from core.social import QUIZ, icebreaker_cards, score_quiz
 
 try:                                   # 回顧圖與照片縮圖需要 Pillow
-    from core.recap import make_thumbnail, render_photo_dump, render_stats_card, render_title_card
+    from core.recap import (ensure_serif_font, make_thumbnail, render_photo_dump, render_stats_card,
+                            render_title_card, serif_ready)
     HAS_PILLOW = True
 except ImportError:                    # 沒裝 Pillow 時其他功能照常
     HAS_PILLOW = False
@@ -329,9 +330,9 @@ async def main(page: ft.Page, cloud=None):
 
     # 路徑不加開頭的「/」：網站放在子路徑（例如 GitHub Pages 的 /table-app/）時，
     # "/fonts/…" 會指到網域根目錄而 404；"fonts/…" 會跟著網站所在的位置走。
-    # 網頁版的 Python 讀不到 assets/，所以也檢查 core/fonts/ 裡的那份（get_font.py 會複製）。
+    # 網頁版的 Python 讀不到 assets/：宋體由瀏覽器直接從網站載入，Logo 則檢查 core/fonts/ 裡的那份。
     fonts = {}
-    if SERIF_FILE.exists() or (PACKAGE_FONTS / SERIF_FILE.name).exists():
+    if SERIF_FILE.exists() or page.web:
         fonts["Serif"] = "fonts/" + SERIF_FILE.name
     if LOGO_FILE.exists() or (PACKAGE_FONTS / LOGO_FILE.name).exists():
         fonts["Logo"] = "fonts/" + LOGO_FILE.name
@@ -1497,6 +1498,7 @@ async def main(page: ft.Page, cloud=None):
 
     # ==================== 個人食譜誌 ====================
     recap_cache: dict[tuple, bytes] = {}
+    font_loading = {"on": False}         # 網頁版：宋體下載中就不要重複下載
 
     def recap_png() -> bytes:
         y, m, kind = state["recap_year"], state["recap_month"], state["recap_kind"]
@@ -1611,6 +1613,19 @@ async def main(page: ft.Page, cloud=None):
         ]
         if not HAS_PILLOW:
             out.append(sans("產生 Dump 需要 Pillow 套件。請在終端機執行：pip3 install pillow", 14, MUTED, height=1.7))
+            return out
+        if not serif_ready():
+            async def load_font():
+                try:
+                    await ensure_serif_font()
+                finally:
+                    font_loading["on"] = False
+                recap_cache.clear()
+                render(keep_scroll=True)
+            if not font_loading["on"]:
+                font_loading["on"] = True
+                page.run_task(load_font)
+            out.append(sans("正在下載字體，第一次會花幾秒鐘…", 14, MUTED, center=True))
             return out
         png = recap_png()
 
@@ -2299,6 +2314,7 @@ async def main(page: ft.Page, cloud=None):
             if not HAS_PILLOW:
                 toast("需要 Pillow 套件才能存成圖片")
                 return
+            await ensure_serif_font()
             await save_png(render_title_card(title, quip), f"席間_{title}.png")
 
         body = [caps("YOUR TABLE TYPE · 你的吃貨派別"), serif(title, 34, ACCENT, ft.FontWeight.W_600, height=1.3),

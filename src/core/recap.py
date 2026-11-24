@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import io
+import sys
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
@@ -23,11 +24,17 @@ EMPTY = (239, 233, 223)     # 沒照片時的底色
 
 HERE = Path(__file__).resolve().parent.parent
 FONTS_DIR = HERE / "assets" / "fonts"
-# 網頁版的 Python 在瀏覽器裡跑，讀不到 assets/，所以字體也要複製一份到 core/fonts/（get_font.py 會做）
+# 網頁版的 Python 在瀏覽器裡跑，讀不到 assets/。
+# 宋體約 8 MB，不打包進 Python 程式包（會拖慢第一次開網頁）：
+# 要產生回顧圖時才用 ensure_serif_font() 從網站的 fonts/ 下載到瀏覽器裡的暫存區。
+# Logo 字體很小，仍然複製一份到 core/fonts/（get_font.py 會做）。
 PACKAGE_FONTS = Path(__file__).resolve().parent / "fonts"
+SERIF_NAME = "NotoSerifTC-Medium.otf"
+WEB_SERIF_URL = "fonts/" + SERIF_NAME          # 相對網址：跟著網站所在位置走（例如 /table-app/）
+WEB_SERIF_CACHE = Path("/tmp/table-fonts") / SERIF_NAME
 SERIF_CANDIDATES = [
-    (PACKAGE_FONTS / "NotoSerifTC-Medium.otf", 0),
-    (FONTS_DIR / "NotoSerifTC-Medium.otf", 0),
+    (FONTS_DIR / SERIF_NAME, 0),                # 電腦版：讀本機檔案
+    (WEB_SERIF_CACHE, 0),                       # 網頁版：ensure_serif_font() 下載後放這裡
     (Path("/usr/share/fonts/opentype/noto/NotoSerifCJK-Medium.ttc"), 3),    # Linux（TC）
     (Path("/System/Library/Fonts/Supplemental/Songti.ttc"), 0),              # macOS 宋體
     (Path("C:/Windows/Fonts/mingliu.ttc"), 0),                               # Windows 細明體
@@ -45,6 +52,39 @@ LOGO_CANDIDATES = [
     (Path("/System/Library/Fonts/Supplemental/Georgia Italic.ttf"), 0),
     (Path("C:/Windows/Fonts/georgiai.ttf"), 0),
 ]
+
+
+def _is_web() -> bool:
+    return sys.platform == "emscripten"
+
+
+_web_serif_failed = False
+
+
+def serif_ready() -> bool:
+    """回顧圖用的宋體是否已經就緒（或不需要再等）。電腦版永遠是 True。"""
+    return not _is_web() or _web_serif_failed or WEB_SERIF_CACHE.exists()
+
+
+async def ensure_serif_font() -> bool:
+    """網頁版：第一次產生回顧圖前，從網站下載宋體。失敗就用預設字體，不再重試。"""
+    global _web_serif_failed
+    if not _is_web() or WEB_SERIF_CACHE.exists():
+        return True
+    if _web_serif_failed:
+        return False
+    try:
+        from pyodide.http import pyfetch
+        resp = await pyfetch(WEB_SERIF_URL)
+        if not resp.ok:
+            raise OSError(f"HTTP {resp.status}")
+        data = await resp.bytes()
+        WEB_SERIF_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        WEB_SERIF_CACHE.write_bytes(data)
+        return True
+    except Exception:
+        _web_serif_failed = True
+        return False
 
 
 class Fonts:
