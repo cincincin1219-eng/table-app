@@ -476,7 +476,8 @@ async def main(page: ft.Page, cloud=None):
         row.append(sans(label, 13.5, fg, spacing=1.0))
         return ft.Container(
             height=40, border_radius=20, padding=pad(16, 0, 16, 0), alignment=ft.Alignment.CENTER,
-            on_click=on_click, **(olive_fill() if selected else GLASS_KW),
+            on_click=on_click,
+            **({"gradient": olive_fill()["gradient"]} if selected else GLASS_FLAT),
             content=ft.Row(row, spacing=6, tight=True, alignment=ft.MainAxisAlignment.CENTER),
         )
 
@@ -484,10 +485,17 @@ async def main(page: ft.Page, cloud=None):
         return caps(f"{en} · {zh}")
 
     # ---------- 毛玻璃風格 ----------
-    GLASS_KW = {"bgcolor": ft.Colors.with_opacity(0.52, "#FFFFFF"),
-                "border": border_all(1, ft.Colors.with_opacity(0.9, "#FFFFFF")),
-                "shadow": ft.BoxShadow(blur_radius=28, spread_radius=-6,
-                                       color=ft.Colors.with_opacity(0.10, "#5C4B36"), offset=ft.Offset(0, 10))}
+    # 毛玻璃：左上比較亮、右下比較透，加上白色亮邊與兩層陰影（外面一層落影、上緣一道反光）
+    GLASS_KW = {"gradient": ft.LinearGradient(begin=ft.Alignment(-1, -1), end=ft.Alignment(1, 1),
+                                              colors=[ft.Colors.with_opacity(0.85, "#FFFFFF"),
+                                                      ft.Colors.with_opacity(0.40, "#FFFFFF")]),
+                "border": border_all(1.2, ft.Colors.with_opacity(0.95, "#FFFFFF")),
+                "shadow": [ft.BoxShadow(blur_radius=32, spread_radius=-8,
+                                        color=ft.Colors.with_opacity(0.18, "#6B5A45"), offset=ft.Offset(0, 14)),
+                           ft.BoxShadow(blur_radius=2, color=ft.Colors.with_opacity(0.7, "#FFFFFF"),
+                                        offset=ft.Offset(0, -1))]}
+    # 小標籤用的毛玻璃：同樣的亮面，但不加陰影（橫向捲動列會把陰影切成一塊色帶）
+    GLASS_FLAT = {"gradient": GLASS_KW["gradient"], "border": GLASS_KW["border"]}
 
     def olive_fill() -> dict:
         return {"gradient": ft.LinearGradient(begin=ft.Alignment(-1, -1), end=ft.Alignment(1, 1),
