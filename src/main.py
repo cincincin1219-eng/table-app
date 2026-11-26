@@ -2698,16 +2698,8 @@ async def main(page: ft.Page, cloud=None):
         return ("tab", state["tab"])
 
     def backdrop(cw: int):
-        """奶茶色漸層＋兩道淡淡的弧線，讓毛玻璃有東西可以透。"""
-        return [
-            ft.Container(left=0, top=0, right=0, bottom=0, gradient=ft.LinearGradient(
-                begin=ft.Alignment(-1, -1), end=ft.Alignment(1, 1), colors=[BG_TOP, BG, BG_BOTTOM])),
-            ft.Container(left=-cw * 0.45, top=-cw * 0.55, width=cw * 1.1, height=cw * 1.1, border_radius=cw * 0.55,
-                         bgcolor=ft.Colors.with_opacity(0.35, "#FFFFFF"),
-                         border=border_all(1, ft.Colors.with_opacity(0.6, "#FFFFFF"))),
-            ft.Container(right=-cw * 0.6, bottom=cw * 0.15, width=cw * 1.2, height=cw * 1.2, border_radius=cw * 0.6,
-                         border=border_all(1, ft.Colors.with_opacity(0.55, "#FFFFFF"))),
-        ]
+        """背景：單一奶茶色。"""
+        return [ft.Container(left=0, top=0, right=0, bottom=0, bgcolor=BG)]
 
     def render(keep_scroll: bool = False):
         nonlocal body_list
