@@ -458,7 +458,7 @@ async def main(page: ft.Page, cloud=None):
             row.append(ft.Icon(trailing, size=18, color=fg))
         return ft.Container(
             height=52, border_radius=26, expand=expand, on_click=on_click, ink=True,
-            **(olive_fill() if filled else GLASS_KW),
+            **(olive_fill() if filled else FROST_KW),
             padding=pad(22, 0, 22, 0), alignment=ft.Alignment.CENTER,
             content=ft.Row(row, spacing=10, tight=True, alignment=ft.MainAxisAlignment.CENTER),
         )
@@ -485,17 +485,21 @@ async def main(page: ft.Page, cloud=None):
         return caps(f"{en} · {zh}")
 
     # ---------- 毛玻璃風格 ----------
-    # 毛玻璃：左上比較亮、右下比較透，加上白色亮邊與兩層陰影（外面一層落影、上緣一道反光）
-    GLASS_KW = {"gradient": ft.LinearGradient(begin=ft.Alignment(-1, -1), end=ft.Alignment(1, 1),
-                                              colors=[ft.Colors.with_opacity(0.85, "#FFFFFF"),
-                                                      ft.Colors.with_opacity(0.40, "#FFFFFF")]),
-                "border": border_all(1.2, ft.Colors.with_opacity(0.95, "#FFFFFF")),
-                "shadow": [ft.BoxShadow(blur_radius=32, spread_radius=-8,
-                                        color=ft.Colors.with_opacity(0.18, "#6B5A45"), offset=ft.Offset(0, 14)),
-                           ft.BoxShadow(blur_radius=2, color=ft.Colors.with_opacity(0.7, "#FFFFFF"),
-                                        offset=ft.Offset(0, -1))]}
-    # 小標籤用的毛玻璃：同樣的亮面，但不加陰影（橫向捲動列會把陰影切成一塊色帶）
-    GLASS_FLAT = {"gradient": GLASS_KW["gradient"], "border": GLASS_KW["border"]}
+    # 一般卡片：乾淨的半透明白，不模糊，只有很淡的陰影
+    CARD_KW = {"bgcolor": ft.Colors.with_opacity(0.72, "#FFFFFF"),
+               "border": border_all(1, ft.Colors.with_opacity(0.9, "#FFFFFF")),
+               "shadow": ft.BoxShadow(blur_radius=18, spread_radius=-6,
+                                      color=ft.Colors.with_opacity(0.08, "#6B5A45"), offset=ft.Offset(0, 6))}
+    # 小標籤：同樣的白，不加陰影（橫向捲動列會把陰影切成一塊色帶）
+    GLASS_FLAT = {"bgcolor": CARD_KW["bgcolor"], "border": CARD_KW["border"]}
+    # 真正的毛玻璃：只用在大按鈕、主卡片和底部導覽列，會把後面的色光模糊掉
+    FROST_KW = {"blur": ft.Blur(26, 26),
+                "gradient": ft.LinearGradient(begin=ft.Alignment(0, -1), end=ft.Alignment(0, 1),
+                                              colors=[ft.Colors.with_opacity(0.55, "#FFFFFF"),
+                                                      ft.Colors.with_opacity(0.28, "#FFFFFF")]),
+                "border": border_all(1.2, ft.Colors.with_opacity(0.85, "#FFFFFF")),
+                "shadow": ft.BoxShadow(blur_radius=30, spread_radius=-8,
+                                       color=ft.Colors.with_opacity(0.16, "#6B5A45"), offset=ft.Offset(0, 12))}
 
     def olive_fill() -> dict:
         return {"gradient": ft.LinearGradient(begin=ft.Alignment(-1, -1), end=ft.Alignment(1, 1),
@@ -712,7 +716,7 @@ async def main(page: ft.Page, cloud=None):
                            vertical_alignment=ft.CrossAxisAlignment.CENTER),
         )
         return ft.Container(
-            **GLASS_KW, border_radius=22, padding=pad(14, 14, 14, 4),
+            **CARD_KW, border_radius=22, padding=pad(14, 14, 14, 4),
             content=ft.Column([author_row, body, action_row], spacing=14),
         )
 
@@ -760,7 +764,7 @@ async def main(page: ft.Page, cloud=None):
             cards = [feed_card(p, cw) for p in posts]
             if not store.entries:
                 cards.insert(0, ft.Container(
-                    **GLASS_KW, border_radius=22, padding=22,
+                    **CARD_KW, border_radius=22, padding=22,
                     on_click=lambda e: open_overlay("record"),
                     content=ft.Column(spacing=8, controls=[
                         caps("YOUR FIRST TABLE"),
@@ -778,7 +782,7 @@ async def main(page: ft.Page, cloud=None):
             cards.append(sans("載入中…", 13, MUTED))
         elif not state["feed"]:
             cards.append(ft.Container(
-                **GLASS_KW, border_radius=22, padding=22,
+                **CARD_KW, border_radius=22, padding=22,
                 content=ft.Column(spacing=8, controls=[
                     serif("校園動態還很安靜", 20),
                     sans("當第一個分享的人吧：按下方的＋記一餐，或到探索幫愛店助力。", 14, BODY, height=1.7)]),
@@ -954,7 +958,7 @@ async def main(page: ft.Page, cloud=None):
 
     def place_card(r: Restaurant, info: str):
         return ft.Container(
-            **GLASS_KW, border_radius=20, padding=18,
+            **CARD_KW, border_radius=20, padding=18,
             content=ft.Column(spacing=14, controls=[
                 ft.Row(vertical_alignment=ft.CrossAxisAlignment.START, controls=[
                     ft.Column([serif(r.name, 17), sans(info, 12, MUTED, height=1.6)], spacing=4, expand=True),
@@ -1198,7 +1202,7 @@ async def main(page: ft.Page, cloud=None):
         status, is_open = restaurant_status(r, now)
         price = f" · {price_text(r)}" if r.price > 0 else ""
         return ft.Container(
-            **GLASS_KW, border_radius=26, padding=pad(12, 12, 6, 12),
+            **CARD_KW, border_radius=26, padding=pad(12, 12, 6, 12),
             on_click=lambda e: open_overlay("place", restaurant=r),
             content=ft.Row(vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=14, controls=[
                 thumb(r.id, r.name, 56),
@@ -1244,7 +1248,7 @@ async def main(page: ft.Page, cloud=None):
             open_overlay("quiz")
 
         hero = ft.Container(
-            **GLASS_KW, border_radius=30, padding=24, blur=ft.Blur(18, 18),
+            **FROST_KW, border_radius=30, padding=24,
             content=ft.Column(spacing=8, controls=[
                 caps("QUICK PICK · 30 秒決定"),
                 serif("下一餐，交給我們挑。", 26, weight=ft.FontWeight.W_600),
@@ -1445,7 +1449,7 @@ async def main(page: ft.Page, cloud=None):
             open_overlay("record", restaurant=r, walk=rec.walk_minutes, surprise=from_surprise)
 
         return ft.Container(
-            **GLASS_KW, border_radius=22, padding=20,
+            **CARD_KW, border_radius=22, padding=20,
             content=ft.Column(spacing=10, controls=[
                 ft.Row([caps("SURPRISE" if from_surprise else f"0{no}"), ft.Container(expand=True),
                         caps(price_text(r))]),
@@ -1535,7 +1539,7 @@ async def main(page: ft.Page, cloud=None):
                     open_overlay("record", name=w["name"])
 
             return ft.Container(
-                **GLASS_KW, border_radius=20, padding=pad(18, 16, 8, 12),
+                **CARD_KW, border_radius=20, padding=pad(18, 16, 8, 12),
                 on_click=(lambda e: open_overlay("place", restaurant=r)) if r else None,
                 content=ft.Column(spacing=6, controls=[
                     ft.Row(vertical_alignment=ft.CrossAxisAlignment.START, controls=[
@@ -1583,7 +1587,7 @@ async def main(page: ft.Page, cloud=None):
             controls += [wish_card(w) for w in store.wish]
         else:
             controls.append(ft.Container(
-                **GLASS_KW, border_radius=22, padding=24,
+                **CARD_KW, border_radius=22, padding=24,
                 content=ft.Column(spacing=8, controls=[
                     serif("還沒有想去的店", 20),
                     sans("在動態或探索按書籤，店就會收在這裡。選不出來的時候，可以從清單抽一家。", 14, BODY, height=1.7),
@@ -1664,7 +1668,7 @@ async def main(page: ft.Page, cloud=None):
     def journal_grid(cw: int, entries):
         if not entries:
             return [ft.Container(
-                **GLASS_KW, border_radius=22, padding=24,
+                **CARD_KW, border_radius=22, padding=24,
                 content=ft.Column(spacing=8, controls=[
                     serif("食譜誌還是空白的", 20),
                     sans("按下方的＋記錄這一餐，或在探索選一家「就吃這家」。", 14, BODY, height=1.7),
@@ -1814,14 +1818,14 @@ async def main(page: ft.Page, cloud=None):
     def login_card(title: str, body: str):
         if not cloud.enabled:
             return ft.Container(
-                **GLASS_KW, border_radius=22, padding=22,
+                **CARD_KW, border_radius=22, padding=22,
                 content=ft.Column(spacing=8, controls=[
                     caps("COMING SOON · 社群功能"), serif("社群功能還沒開通", 20),
                     sans("負責的組員照 README「社群功能設定」那一節接上 Supabase 後，這裡就能登入。"
                          "現在先看範例。", 14, BODY, height=1.7)]),
             )
         return ft.Container(
-            **GLASS_KW, border_radius=22, padding=22,
+            **CARD_KW, border_radius=22, padding=22,
             content=ft.Column(spacing=8, controls=[
                 caps("JOIN · 加入餐桌"), serif(title, 20), sans(body, 14, BODY, height=1.7),
                 ft.Container(height=4),
@@ -2534,7 +2538,7 @@ async def main(page: ft.Page, cloud=None):
 
                 share_text = f"加我好友，一起用 Table 席間約吃飯：{link}"
                 body.append(ft.Container(
-                    **GLASS_KW, border_radius=22, padding=20,
+                    **CARD_KW, border_radius=22, padding=20,
                     content=ft.Column(spacing=14, horizontal_alignment=ft.CrossAxisAlignment.CENTER, controls=[
                         caps("MY FRIEND LINK · 我的好友連結"),
                         ft.Image(src=qr_png(link, scale=6), width=200, height=200),
@@ -2631,7 +2635,7 @@ async def main(page: ft.Page, cloud=None):
         for i, row in enumerate(rows or []):
             r = by_id.get(row["restaurant_id"])
             out.append(ft.Container(
-                **GLASS_KW, border_radius=34, padding=pad(18, 12, 10, 12),
+                **CARD_KW, border_radius=34, padding=pad(18, 12, 10, 12),
                 on_click=(lambda e, r=r: open_overlay("place", restaurant=r)) if r else None,
                 content=ft.Row(spacing=14, vertical_alignment=ft.CrossAxisAlignment.CENTER, controls=[
                     ft.Container(width=40, content=ft.Text(f"{i + 1:02d}", size=30, color=MUTED, italic=True,
@@ -2688,9 +2692,7 @@ async def main(page: ft.Page, cloud=None):
 
     def glass(content, height=64, padding=None):
         return ft.Container(
-            height=height, border_radius=height / 2, bgcolor=ft.Colors.with_opacity(0.62, "#FFFFFF"),
-            blur=ft.Blur(22, 22), border=border_all(1, ft.Colors.with_opacity(0.95, "#FFFFFF")), padding=padding,
-            shadow=ft.BoxShadow(blur_radius=30, color=ft.Colors.with_opacity(0.08, INK), offset=ft.Offset(0, 10)),
+            height=height, border_radius=height / 2, **FROST_KW, padding=padding,
             content=content,
         )
 
@@ -2706,8 +2708,18 @@ async def main(page: ft.Page, cloud=None):
         return ("tab", state["tab"])
 
     def backdrop(cw: int):
-        """背景：單一奶茶色。"""
-        return [ft.Container(left=0, top=0, right=0, bottom=0, bgcolor=BG)]
+        """背景：乾淨的奶茶色，加三團很柔的色光（邊緣完全淡出，沒有線條）。
+        毛玻璃要「後面有東西」才看得出來，這些色光就是給它模糊用的。"""
+        def glow(color: str, size: float, **pos):
+            return ft.Container(**pos, width=size, height=size, border_radius=size / 2,
+                                gradient=ft.RadialGradient(colors=[ft.Colors.with_opacity(0.55, color),
+                                                                   ft.Colors.with_opacity(0.0, color)]))
+        return [
+            ft.Container(left=0, top=0, right=0, bottom=0, bgcolor=BG),
+            glow("#E8BF98", cw * 1.0, right=-cw * 0.35, top=cw * 0.25),      # 杏桃色：在主卡片後面
+            glow("#AEB58E", cw * 0.9, left=-cw * 0.4, top=cw * 0.75),       # 鼠尾草綠
+            glow("#E2C4B6", cw * 0.9, right=-cw * 0.3, bottom=-cw * 0.2),   # 玫瑰奶茶：在導覽列後面
+        ]
 
     def render(keep_scroll: bool = False):
         nonlocal body_list
