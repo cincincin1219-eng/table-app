@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import json
 import random
+import re
 import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -33,6 +34,7 @@ from core.data import load_buildings, load_restaurants
 from core.filters import crowd_hint, minutes_until_close, walking_minutes
 from core.models import DAYS, Query, Recommendation, Restaurant
 from core.recommend import explain_empty, recommend, surprise
+from core.qr import qr_png
 from core.social import QUIZ, icebreaker_cards, score_quiz
 
 try:                                   # 回顧圖與照片縮圖需要 Pillow
@@ -43,13 +45,18 @@ except ImportError:                    # 沒裝 Pillow 時其他功能照常
     HAS_PILLOW = False
 
 # ---------- 設計規範（跟設計稿一致） ----------
-BG = "#F8F6F1"          # 亞麻白
+BG = "#EFE8DE"          # 奶茶米：毛玻璃後面的底色
+BG_TOP = "#F6F1EA"      # 背景漸層（上）
+BG_BOTTOM = "#E8DED1"   # 背景漸層（下）
 CARD = "#FFFFFF"        # 紙白
-LINE = "#EAE6DF"        # 暖灰線
-LINE_SOFT = "#F1EEE8"
-INK = "#1C1B18"         # 深炭灰
-BODY = "#3A3833"
-MUTED = "#6E6B64"       # 霧灰（比 #78756E 深一點，對比度才夠）
+LINE = "#E4DBCE"        # 暖灰線
+LINE_SOFT = "#EFE8DE"
+INK = "#2C2A25"         # 深炭灰
+BODY = "#47443D"
+MUTED = "#7A756B"       # 霧灰（對比度夠）
+OLIVE = "#73725A"       # 橄欖綠：主要按鈕、選中的標籤
+OLIVE_DARK = "#5C5B46"
+ON_OLIVE = "#F8F4EC"    # 橄欖綠上的字
 ACCENT = "#B85D43"      # 陶土紅：只用在「同感」「想去」
 EMPTY = "#EFE9DF"       # 沒照片時的底色
 AVATAR_COLORS = ["#EFE6DA", "#E4E8DD", "#F1E1D8", "#E9E3EC", "#E2E6EA"]
@@ -88,12 +95,29 @@ def taipei_now() -> datetime:
     return datetime.now(TAIPEI).replace(tzinfo=None)
 
 
-def walk_url(lat: float, lng: float) -> str:
-    return f"https://www.google.com/maps/dir/?api=1&destination={lat},{lng}&travelmode=walking"
+# 連鎖店附近有好幾家分店，用店名找可能帶去別家，所以改用座標
+CHAINS = {"麥當勞", "摩斯漢堡", "頂呱呱", "CoCo壹番屋", "壽司郎", "八方雲集", "食其家", "吉野家", "漢堡王",
+          "肯德基", "Subway", "bb.q Chicken", "星巴克", "路易莎咖啡", "85度C"}
+# 加上地區，讓 Google 地圖找到台大附近那一家
+AREA_HINT = {"校內": "國立臺灣大學", "公館": "台北市 公館", "溫州街": "台北市 溫州街",
+             "科技大樓/和平東路": "台北市 和平東路", "台科大/基隆路": "台北市 基隆路"}
 
 
-def map_url(lat: float, lng: float) -> str:
-    return f"https://www.openstreetmap.org/?mlat={lat}&mlon={lng}#map=18/{lat}/{lng}"
+def place_query(r: Restaurant) -> str:
+    """給 Google 地圖的目的地：一般店用「店名＋地區」，讓 Google 用它自己的店家位置；
+    連鎖店用座標，才不會被帶到別家分店。"""
+    if r.name in CHAINS:
+        return f"{r.lat},{r.lng}"
+    return f"{r.name} {AREA_HINT.get(r.area, '台北市')}"
+
+
+def walk_url(r: Restaurant) -> str:
+    return ("https://www.google.com/maps/dir/?api=1&travelmode=walking&destination="
+            + urllib.parse.quote(place_query(r)))
+
+
+def map_url(r: Restaurant) -> str:
+    return "https://www.google.com/maps/search/?api=1&query=" + urllib.parse.quote(place_query(r))
 
 
 def time_of_day(h: int) -> str:
@@ -137,7 +161,28 @@ def price_text(r: Restaurant, prefix: str = "約 ") -> str:
 
 
 def unverified(r: Restaurant) -> bool:
-    return "預覽" in r.last_checked or "OSM" in r.last_checked
+    lc = r.last_checked
+    return any(k in lc for k in ("預覽", "OSM", "估", "待確認", "約略"))
+
+
+def data_note(r: Restaurant) -> str:
+    """說明這家店的資料從哪來、哪裡還沒確認。"""
+    lc, bits = r.last_checked, []
+    if "圖鑑" in lc:
+        bits.append("價格來自台大美食圖鑑實測")
+    elif "估" in lc:
+        bits.append("價格是估計")
+    if "OSM" in lc:
+        bits.append("營業時間來自 OpenStreetMap")
+    elif "待確認" in lc:
+        bits.append("營業時間是推估")
+    if "約略" in lc:
+        bits.append("位置是約略的")
+    if not bits and unverified(r):
+        bits.append("資料還沒人工確認")
+    if bits:
+        return "、".join(bits) + "；過敏資訊請向店家確認。"
+    return "過敏與營業資訊僅供參考，請向店家確認。"
 
 
 def color_for(text: str) -> str:
@@ -359,6 +404,7 @@ async def main(page: ft.Page, cloud=None):
         "origin": "lib", "area": "全部", "explore_limit": 20,
         "step": 1, "minutes": None, "budget": None, "party": None, "tags": set(), "allergens": set(),
         "journal_view": "grid", "recap_year": now0.year, "recap_month": now0.month, "recap_kind": "dump",
+        "friends": None, "pending_friend": None,
     }
 
     def content_width() -> int:
@@ -387,30 +433,34 @@ async def main(page: ft.Page, cloud=None):
 
     def link_button(label: str, url: str, filled: bool = True, expand: bool = False, icon=None, height: int = 48):
         """打開外部連結（導航、地圖）的按鈕。用按鈕內建的 url，瀏覽器才不會當成彈出視窗擋掉。"""
-        fg = CARD if filled else INK
+        fg = ON_OLIVE if filled else INK
         row = [ft.Icon(icon, size=18, color=fg)] if icon else []
         row.append(sans(label, 14 if height >= 44 else 13, fg, ft.FontWeight.W_500, spacing=0.6))
         return ft.Button(
             content=ft.Row(row, spacing=6, tight=True, alignment=ft.MainAxisAlignment.CENTER),
-            url=url, expand=expand, height=height, bgcolor=INK if filled else CARD, color=fg,
+            url=url, expand=expand, height=height, color=fg,
+            bgcolor=OLIVE if filled else ft.Colors.with_opacity(0.55, "#FFFFFF"),
             style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=height / 2), elevation=0,
-                                 side=None if filled else ft.BorderSide(1, LINE)),
+                                 side=None if filled else ft.BorderSide(1, ft.Colors.with_opacity(0.9, "#FFFFFF"))),
         )
 
     def avatar(initial: str, size: int = 28, bg: str | None = None):
         return ft.Container(width=size, height=size, border_radius=size / 2, bgcolor=bg or color_for(initial),
                             alignment=ft.Alignment.CENTER, content=serif(initial, size * 0.46, height=1.0))
 
-    def pill(label: str, on_click, filled: bool = True, expand: bool = False, icon=None, accent: bool = False):
-        fg = CARD if filled else (ACCENT if accent else INK)
-        bg = (ACCENT if accent else INK) if filled else None
-        row = [ft.Icon(icon, size=18, color=fg)] if icon else []
-        row.append(sans(label, 14, fg, ft.FontWeight.W_500, spacing=0.6))
+    def pill(label: str, on_click, filled: bool = True, expand: bool = False, icon=None, accent: bool = False,
+             trailing=None):
+        """主要按鈕＝橄欖綠漸層；次要按鈕＝毛玻璃。（accent 參數保留給舊程式，樣式已統一）"""
+        fg = ON_OLIVE if filled else INK
+        row = [ft.Icon(icon, size=19, color=fg)] if icon else []
+        row.append(sans(label, 15, fg, ft.FontWeight.W_500, spacing=1.2))
+        if trailing:
+            row.append(ft.Icon(trailing, size=18, color=fg))
         return ft.Container(
-            height=48, border_radius=24, bgcolor=bg, expand=expand, on_click=on_click, ink=True,
-            border=None if filled else hairline(ACCENT if accent else LINE),
-            padding=pad(20, 0, 20, 0), alignment=ft.Alignment.CENTER,
-            content=ft.Row(row, spacing=8, tight=True, alignment=ft.MainAxisAlignment.CENTER),
+            height=52, border_radius=26, expand=expand, on_click=on_click, ink=True,
+            **(olive_fill() if filled else GLASS_KW),
+            padding=pad(22, 0, 22, 0), alignment=ft.Alignment.CENTER,
+            content=ft.Row(row, spacing=10, tight=True, alignment=ft.MainAxisAlignment.CENTER),
         )
 
     def text_tab(label: str, selected: bool, on_click):
@@ -420,15 +470,52 @@ async def main(page: ft.Page, cloud=None):
             content=sans(label, 14, INK if selected else MUTED, ft.FontWeight.W_500 if selected else None),
         )
 
-    def chip(label: str, selected: bool, on_click):
+    def chip(label: str, selected: bool, on_click, icon=None):
+        fg = ON_OLIVE if selected else INK
+        row = [ft.Icon(icon, size=17, color=fg)] if (icon and selected) else []
+        row.append(sans(label, 13.5, fg, spacing=1.0))
         return ft.Container(
-            height=36, border_radius=18, padding=pad(14, 0, 14, 0), alignment=ft.Alignment.CENTER,
-            bgcolor=INK if selected else CARD, border=hairline(INK if selected else LINE),
-            on_click=on_click, content=sans(label, 13, CARD if selected else INK),
+            height=40, border_radius=20, padding=pad(16, 0, 16, 0), alignment=ft.Alignment.CENTER,
+            on_click=on_click, **(olive_fill() if selected else GLASS_KW),
+            content=ft.Row(row, spacing=6, tight=True, alignment=ft.MainAxisAlignment.CENTER),
         )
 
     def section_label(en: str, zh: str):
         return caps(f"{en} · {zh}")
+
+    # ---------- 毛玻璃風格 ----------
+    GLASS_KW = {"bgcolor": ft.Colors.with_opacity(0.52, "#FFFFFF"),
+                "border": border_all(1, ft.Colors.with_opacity(0.9, "#FFFFFF")),
+                "shadow": ft.BoxShadow(blur_radius=28, spread_radius=-6,
+                                       color=ft.Colors.with_opacity(0.10, "#5C4B36"), offset=ft.Offset(0, 10))}
+
+    def olive_fill() -> dict:
+        return {"gradient": ft.LinearGradient(begin=ft.Alignment(-1, -1), end=ft.Alignment(1, 1),
+                                              colors=[OLIVE, OLIVE_DARK]),
+                "shadow": ft.BoxShadow(blur_radius=18, spread_radius=-4,
+                                       color=ft.Colors.with_opacity(0.35, OLIVE_DARK), offset=ft.Offset(0, 8))}
+
+    def thumb(rid: str, name: str, size: int = 64):
+        """店家小圖：自己拍過的照片 → 同學分享的照片 → 店名第一個字。"""
+        src = None
+        for e in journal.sort_newest_first(store.entries):
+            if e.restaurant_id == rid and store.photos.get(e.id) is not None:
+                src = store.photos[e.id]
+                break
+        if src is None:
+            for a in state["feed"] or []:
+                if a.get("restaurant_id") == rid and a.get("photo_path"):
+                    src = cloud.public_url(a["photo_path"])
+                    break
+        frame_kw = {"width": size, "height": size, "border_radius": 16,
+                    "border": border_all(2, ft.Colors.with_opacity(0.9, "#FFFFFF"))}
+        if src is not None:
+            return ft.Container(**frame_kw, clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+                                content=ft.Image(src=src, width=size, height=size, fit=ft.BoxFit.COVER))
+        return ft.Container(**frame_kw, alignment=ft.Alignment.CENTER,
+                            gradient=ft.LinearGradient(begin=ft.Alignment(-1, -1), end=ft.Alignment(1, 1),
+                                                       colors=["#F3E9DC", "#E2D3BF"]),
+                            content=serif((name or "席")[:1], size * 0.38, OLIVE_DARK, height=1.0))
 
     def photo_box(src, width: float, ratio: float = 1.25, radius: int = 16, initial: str = "", small=False):
         """4:5 照片；沒有照片時用暖色底＋店名第一個字。"""
@@ -617,7 +704,7 @@ async def main(page: ft.Page, cloud=None):
                            vertical_alignment=ft.CrossAxisAlignment.CENTER),
         )
         return ft.Container(
-            bgcolor=CARD, border=hairline(), border_radius=22, padding=pad(14, 14, 14, 4),
+            **GLASS_KW, border_radius=22, padding=pad(14, 14, 14, 4),
             content=ft.Column([author_row, body, action_row], spacing=14),
         )
 
@@ -665,7 +752,7 @@ async def main(page: ft.Page, cloud=None):
             cards = [feed_card(p, cw) for p in posts]
             if not store.entries:
                 cards.insert(0, ft.Container(
-                    bgcolor=CARD, border=hairline(), border_radius=22, padding=22,
+                    **GLASS_KW, border_radius=22, padding=22,
                     on_click=lambda e: open_overlay("record"),
                     content=ft.Column(spacing=8, controls=[
                         caps("YOUR FIRST TABLE"),
@@ -683,7 +770,7 @@ async def main(page: ft.Page, cloud=None):
             cards.append(sans("載入中…", 13, MUTED))
         elif not state["feed"]:
             cards.append(ft.Container(
-                bgcolor=CARD, border=hairline(), border_radius=22, padding=22,
+                **GLASS_KW, border_radius=22, padding=22,
                 content=ft.Column(spacing=8, controls=[
                     serif("校園動態還很安靜", 20),
                     sans("當第一個分享的人吧：按下方的＋記一餐，或到探索幫愛店助力。", 14, BODY, height=1.7)]),
@@ -859,13 +946,13 @@ async def main(page: ft.Page, cloud=None):
 
     def place_card(r: Restaurant, info: str):
         return ft.Container(
-            bgcolor=CARD, border=hairline(), border_radius=20, padding=18,
+            **GLASS_KW, border_radius=20, padding=18,
             content=ft.Column(spacing=14, controls=[
                 ft.Row(vertical_alignment=ft.CrossAxisAlignment.START, controls=[
                     ft.Column([serif(r.name, 17), sans(info, 12, MUTED, height=1.6)], spacing=4, expand=True),
                     ft.Icon(ft.Icons.PLACE_OUTLINED, size=22, color=MUTED)]),
-                ft.Row([link_button("在地圖上看", map_url(r.lat, r.lng), filled=False, expand=True),
-                        link_button("導航過去", walk_url(r.lat, r.lng), expand=True,
+                ft.Row([link_button("在地圖上看", map_url(r), filled=False, expand=True),
+                        link_button("導航過去", walk_url(r), expand=True,
                                     icon=ft.Icons.DIRECTIONS_WALK)], spacing=10),
             ]),
         )
@@ -1103,9 +1190,10 @@ async def main(page: ft.Page, cloud=None):
         status, is_open = restaurant_status(r, now)
         price = f" · {price_text(r)}" if r.price > 0 else ""
         return ft.Container(
-            bgcolor=CARD, border=hairline(), border_radius=18, padding=pad(16, 12, 6, 12),
+            **GLASS_KW, border_radius=26, padding=pad(12, 12, 6, 12),
             on_click=lambda e: open_overlay("place", restaurant=r),
-            content=ft.Row(vertical_alignment=ft.CrossAxisAlignment.CENTER, controls=[
+            content=ft.Row(vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=14, controls=[
+                thumb(r.id, r.name, 56),
                 ft.Column(spacing=4, expand=True, controls=[
                     serif(r.name, 18, max_lines=1, height=1.3),
                     sans(f"{r.area} · 走 {walk} 分 · {status}{price}", 12, MUTED if is_open else "#9C978E",
@@ -1148,33 +1236,38 @@ async def main(page: ft.Page, cloud=None):
             open_overlay("quiz")
 
         hero = ft.Container(
-            bgcolor=CARD, border=hairline(), border_radius=22, padding=22,
+            **GLASS_KW, border_radius=30, padding=24, blur=ft.Blur(18, 18),
             content=ft.Column(spacing=8, controls=[
                 caps("QUICK PICK · 30 秒決定"),
-                serif("下一餐，交給我們挑。", 24),
+                serif("下一餐，交給我們挑。", 26, weight=ft.FontWeight.W_600),
                 sans(f"從「{b.name}」出發。回答 4 個小問題，只推薦現在有開、走得到的店。", 14, BODY, height=1.7),
                 ft.Container(height=6),
-                ft.Row([pill("開始", start_quiz, expand=True),
-                        pill("驚喜一下", lambda e: open_surprise(default_query()), filled=False, accent=True,
-                             icon=ft.Icons.CASINO_OUTLINED)], spacing=10),
+                ft.Row([ft.Container(expand=3, content=pill("開始", start_quiz, expand=True,
+                                                             trailing=ft.Icons.CHEVRON_RIGHT)),
+                        ft.Container(expand=2, content=pill("驚喜一下", lambda e: open_surprise(default_query()),
+                                                             filled=False, expand=True, icon=ft.Icons.CASINO_OUTLINED))],
+                       spacing=12),
             ]),
         )
         controls = [
             ft.Row(alignment=ft.MainAxisAlignment.SPACE_BETWEEN, vertical_alignment=ft.CrossAxisAlignment.END,
-                   controls=[ft.Column([caps("EXPLORE · NTU"), serif("探索", 30, weight=ft.FontWeight.W_600, height=1.2)],
-                                       spacing=4),
-                             caps(f"現在營業 {len(open_now)} 家")]),
-            ft.Column(spacing=10, controls=[
+                   controls=[ft.Column([caps("EXPLORE · NTU"),
+                                        serif("探索", 38, weight=ft.FontWeight.W_600, height=1.2),
+                                        ft.Container(width=64, height=1.5, bgcolor=OLIVE)], spacing=6),
+                             ft.Container(padding=pad(0, 0, 0, 22), content=caps(f"現在營業 {len(open_now)} 家", 12))]),
+            ft.Column(spacing=12, controls=[
                 section_label("FROM", "你在哪"),
-                ft.Row(scroll=ft.ScrollMode.AUTO, spacing=8,
-                       controls=[chip(x.name, x.id == state["origin"], set_origin(x.id)) for x in buildings]),
+                ft.Row(scroll=ft.ScrollMode.AUTO, spacing=10,
+                       controls=[chip(x.name, x.id == state["origin"], set_origin(x.id),
+                                      icon=ft.Icons.MENU_BOOK_OUTLINED if x.id == "lib" else ft.Icons.PLACE_OUTLINED)
+                                 for x in buildings]),
             ]),
             hero,
-            ft.Column(leaderboard_section(), spacing=8),
+            ft.Column(leaderboard_section(), spacing=12),
             ft.Column(spacing=12, controls=[
                 ft.Row(alignment=ft.MainAxisAlignment.SPACE_BETWEEN, controls=[
                     section_label("OPEN NOW", "附近現在有開"), caps(f"{len(pool)} 家")]),
-                ft.Row(scroll=ft.ScrollMode.AUTO, spacing=8,
+                ft.Row(scroll=ft.ScrollMode.AUTO, spacing=10,
                        controls=[chip(a, a == state["area"], set_area(a)) for a in areas]),
             ]),
             *([explore_row(r, now) for r in shown] or [
@@ -1183,7 +1276,7 @@ async def main(page: ft.Page, cloud=None):
         if len(pool) > len(shown):
             controls.append(ft.Row([pill(f"再看 {min(20, len(pool) - len(shown))} 家", more, filled=False, expand=True)]))
         controls.append(sans("餐廳資料 © OpenStreetMap contributors · 營業時間僅供參考", 11, MUTED, center=True))
-        return [ft.Container(padding=pad(PAD, 20, PAD, 0), content=ft.Column(controls, spacing=18))]
+        return [ft.Container(padding=pad(PAD, 28, PAD, 0), content=ft.Column(controls, spacing=22))]
 
     # ---------- 店家頁（從探索、想去點進來） ----------
     def place_screen(cw: int):
@@ -1225,8 +1318,7 @@ async def main(page: ft.Page, cloud=None):
                                                     sans(e.note[:14] + ("…" if len(e.note) > 14 else ""), 12, MUTED)]))
                        for e in mine[:5]] or [sans("還沒來過。吃完記一筆，下次就找得到。", 13, MUTED)]),
                 ]),
-                sans("營業時間來自 OpenStreetMap、價格是估計，還沒人工確認；過敏資訊請向店家確認。"
-                     if unverified(r) else "過敏與營業資訊僅供參考，請向店家確認。", 11, MUTED, height=1.6),
+                sans(data_note(r), 11, MUTED, height=1.6),
             ])),
         ]
         return blocks
@@ -1234,7 +1326,7 @@ async def main(page: ft.Page, cloud=None):
     def place_bar(r: Restaurant):
         return ft.Row(vertical_alignment=ft.CrossAxisAlignment.CENTER, controls=[
             ft.Container(padding=pad(6, 0, 0, 0), content=link_button(
-                "導航", walk_url(r.lat, r.lng), filled=False, icon=ft.Icons.DIRECTIONS_WALK, height=44)),
+                "導航", walk_url(r), filled=False, icon=ft.Icons.DIRECTIONS_WALK, height=44)),
             ft.Container(expand=True),
             boost_button(r.id, r.name, r.area),
             wish_button(wish_item_from_restaurant(r)),
@@ -1338,7 +1430,6 @@ async def main(page: ft.Page, cloud=None):
         busy = rec.crowd_hint.startswith("尖峰時段，可能")
         crowd = "可能要排隊" if busy else ("人有點多" if "稍多" in rec.crowd_hint else "應該不用排")
         closing = f"{rec.minutes_until_close} 分後打烊" if rec.minutes_until_close < 90 else "營業中"
-        preview = unverified(r)
 
         def eat_here(e):
             if from_surprise:
@@ -1346,7 +1437,7 @@ async def main(page: ft.Page, cloud=None):
             open_overlay("record", restaurant=r, walk=rec.walk_minutes, surprise=from_surprise)
 
         return ft.Container(
-            bgcolor=CARD, border=hairline(), border_radius=22, padding=20,
+            **GLASS_KW, border_radius=22, padding=20,
             content=ft.Column(spacing=10, controls=[
                 ft.Row([caps("SURPRISE" if from_surprise else f"0{no}"), ft.Container(expand=True),
                         caps(price_text(r))]),
@@ -1357,10 +1448,10 @@ async def main(page: ft.Page, cloud=None):
                 ft.Container(height=2),
                 ft.Row(spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER, controls=[
                     pill("就吃這家", eat_here, expand=True),
-                    link_button("導航", walk_url(r.lat, r.lng), filled=False, icon=ft.Icons.DIRECTIONS_WALK),
+                    link_button("導航", walk_url(r), filled=False, icon=ft.Icons.DIRECTIONS_WALK),
                     wish_button(wish_item_from_restaurant(r)),
                 ]),
-                sans("營業時間來自 OpenStreetMap、價格是估計，還沒人工確認" if preview else "過敏資訊僅供參考，請向店家確認", 11, MUTED),
+                sans(data_note(r), 11, MUTED),
             ]),
         )
 
@@ -1436,7 +1527,7 @@ async def main(page: ft.Page, cloud=None):
                     open_overlay("record", name=w["name"])
 
             return ft.Container(
-                bgcolor=CARD, border=hairline(), border_radius=20, padding=pad(18, 16, 8, 12),
+                **GLASS_KW, border_radius=20, padding=pad(18, 16, 8, 12),
                 on_click=(lambda e: open_overlay("place", restaurant=r)) if r else None,
                 content=ft.Column(spacing=6, controls=[
                     ft.Row(vertical_alignment=ft.CrossAxisAlignment.START, controls=[
@@ -1447,7 +1538,7 @@ async def main(page: ft.Page, cloud=None):
                     ]),
                     ft.Row(spacing=4, controls=[
                         ft.TextButton(content=sans("記錄這一餐", 13, INK), on_click=record),
-                        *([link_button("導航", walk_url(r.lat, r.lng), filled=False,
+                        *([link_button("導航", walk_url(r), filled=False,
                                        icon=ft.Icons.DIRECTIONS_WALK, height=36)] if r else []),
                     ]),
                 ]),
@@ -1484,7 +1575,7 @@ async def main(page: ft.Page, cloud=None):
             controls += [wish_card(w) for w in store.wish]
         else:
             controls.append(ft.Container(
-                bgcolor=CARD, border=hairline(), border_radius=22, padding=24,
+                **GLASS_KW, border_radius=22, padding=24,
                 content=ft.Column(spacing=8, controls=[
                     serif("還沒有想去的店", 20),
                     sans("在動態或探索按書籤，店就會收在這裡。選不出來的時候，可以從清單抽一家。", 14, BODY, height=1.7),
@@ -1565,7 +1656,7 @@ async def main(page: ft.Page, cloud=None):
     def journal_grid(cw: int, entries):
         if not entries:
             return [ft.Container(
-                bgcolor=CARD, border=hairline(), border_radius=22, padding=24,
+                **GLASS_KW, border_radius=22, padding=24,
                 content=ft.Column(spacing=8, controls=[
                     serif("食譜誌還是空白的", 20),
                     sans("按下方的＋記錄這一餐，或在探索選一家「就吃這家」。", 14, BODY, height=1.7),
@@ -1715,14 +1806,14 @@ async def main(page: ft.Page, cloud=None):
     def login_card(title: str, body: str):
         if not cloud.enabled:
             return ft.Container(
-                bgcolor=CARD, border=hairline(), border_radius=22, padding=22,
+                **GLASS_KW, border_radius=22, padding=22,
                 content=ft.Column(spacing=8, controls=[
                     caps("COMING SOON · 社群功能"), serif("社群功能還沒開通", 20),
                     sans("負責的組員照 README「社群功能設定」那一節接上 Supabase 後，這裡就能登入。"
                          "現在先看範例。", 14, BODY, height=1.7)]),
             )
         return ft.Container(
-            bgcolor=CARD, border=hairline(), border_radius=22, padding=22,
+            **GLASS_KW, border_radius=22, padding=22,
             content=ft.Column(spacing=8, controls=[
                 caps("JOIN · 加入餐桌"), serif(title, 20), sans(body, 14, BODY, height=1.7),
                 ft.Container(height=4),
@@ -1922,7 +2013,8 @@ async def main(page: ft.Page, cloud=None):
             action = sans("人數已滿", 12, MUTED)
         else:
             action = pill("加入", join_handler(m["id"]), accent=True)
-        lines = [caps(meetup_when(m), 11, ACCENT if m["kind"] == "radar" else MUTED),
+        when = meetup_when(m) + (" · 好友限定" if m.get("friends_only") else "")
+        lines = [caps(when, 11, ACCENT if m["kind"] == "radar" else MUTED),
                  serif(m["restaurant_name"], 20, max_lines=1, height=1.3)]
         if m.get("theme"):
             lines.append(sans(m["theme"], 13, BODY, max_lines=2, height=1.6))
@@ -1951,6 +2043,8 @@ async def main(page: ft.Page, cloud=None):
         render()
         m = next((x for x in state["meetups"] or [] if x["id"] == mid), None)
         if m and m.get("joined"):
+            if state["friends"] is None:
+                await load_friends()
             ok, members = await cloud_call(cloud.meetup_members(mid), quiet=True)
             ov = state["overlay"]
             if ov and ov.get("meetup_id") == mid:
@@ -1994,6 +2088,17 @@ async def main(page: ft.Page, cloud=None):
                              "在飯局頁按「檢舉」。", 11, MUTED, height=1.7))
         return [ft.Container(padding=pad(PAD, 20, PAD, 0), content=ft.Column(controls, spacing=16))]
 
+    def add_friend_button(p: dict):
+        async def handler(e):
+            ok, res = await cloud_call(cloud.request_friend(p["user_id"]))
+            if ok:
+                done, reason = res
+                toast(reason or ("已送出邀請" if done else "無法加好友"))
+                if reason == "已成為好友":
+                    await load_friends()
+                    render(keep_scroll=True)
+        return ft.TextButton(content=sans("加好友", 12, ACCENT), on_click=handler)
+
     def meetup_screen(cw: int):
         ov = state["overlay"]
         mid = ov["meetup_id"]
@@ -2020,7 +2125,9 @@ async def main(page: ft.Page, cloud=None):
                     avatar((p["display_name"] or "?")[:1], 30),
                     ft.Column(spacing=1, expand=True, controls=[sans(p["display_name"], 14, weight=ft.FontWeight.W_500),
                                                                 sans(sub, 11, MUTED)]),
-                    caps("主揪") if p["user_id"] == m["host_id"] else ft.Container()]))
+                    caps("主揪") if p["user_id"] == m["host_id"] else ft.Container(),
+                    add_friend_button(p) if p["user_id"] != cloud.user_id and p["user_id"] not in friend_ids()
+                    else ft.Container()]))
         else:
             people.append(sans("、".join(m.get("member_names") or []), 14, BODY))
         blocks.append(ft.Column([section_label("WHO", f"{len(m.get('member_names') or [])}/{m['capacity']} 人"), *people],
@@ -2064,7 +2171,7 @@ async def main(page: ft.Page, cloud=None):
 
         actions = []
         if r:
-            actions.append(link_button("導航", walk_url(r.lat, r.lng), filled=False, icon=ft.Icons.DIRECTIONS_WALK))
+            actions.append(link_button("導航", walk_url(r), filled=False, icon=ft.Icons.DIRECTIONS_WALK))
         if m.get("joined"):
             actions.append(pill("取消飯局" if m.get("mine") else "退出飯局", leave, filled=False, expand=True))
         else:
@@ -2080,7 +2187,8 @@ async def main(page: ft.Page, cloud=None):
         ov = state["overlay"]
         radar = bool(ov.get("radar"))
         d = ov.setdefault("draft", {"name": "", "restaurant": ov.get("restaurant"), "day": 0, "time": "",
-                                    "capacity": 2 if radar else 4, "theme": "", "pact": store.pact})
+                                    "capacity": 2 if radar else 4, "theme": "", "pact": store.pact,
+                                    "friends_only": bool(ov.get("friends_only"))})
         if d["restaurant"] and not d["name"]:
             d["name"] = d["restaurant"].name
         now = taipei_now()
@@ -2144,11 +2252,12 @@ async def main(page: ft.Page, cloud=None):
                 hh, mm = map(int, d["time"].split(":"))
                 starts = (now + timedelta(days=d["day"])).replace(hour=hh, minute=mm, second=0, microsecond=0)
             ok, mid = await cloud_call(cloud.create_meetup(r.id, r.name, r.area, starts, d["capacity"],
-                                                           d["theme"].strip(), radar))
+                                                           d["theme"].strip(), radar, d["friends_only"]))
             if not ok:
                 return
             await store.set_pact()
-            toast("雷達丟出去了，1 小時內有效" if radar else "飯局開好了，等大家加入")
+            toast(("只有好友看得到。" if d["friends_only"] else "")
+                  + ("雷達丟出去了，1 小時內有效" if radar else "飯局開好了，等大家加入"))
             state["overlay"] = None
             state["tab"] = "meet"
             state["feed"] = None
@@ -2174,6 +2283,14 @@ async def main(page: ft.Page, cloud=None):
                                ft.Row([chip(f"{n} 人", d["capacity"] == n, setter("capacity", n)) for n in range(2, 7)],
                                       wrap=True, spacing=8)], spacing=10))
         form.append(ft.Column([section_label("THEME", "一句話說明（可略過）"), theme_field], spacing=10))
+        who = [section_label("WHO CAN SEE", "誰看得到"),
+               ft.Row([chip("全校同學", not d["friends_only"], setter("friends_only", False)),
+                       chip("只給好友", d["friends_only"], setter("friends_only", True))], spacing=8),
+               sans("只給好友：不會出現在校園動態，只有你的好友看得到、加得進來。" if d["friends_only"] else
+                    "全校同學都看得到，適合認識新朋友。", 12, MUTED, height=1.6)]
+        if d["friends_only"] and state["friends"] is not None and not state["friends"]["list"]:
+            who.append(ft.TextButton(content=sans("你還沒有好友，先去分享好友連結 →", 12, ACCENT), on_click=open_friends))
+        form.append(ft.Column(who, spacing=10))
         form.append(ft.Container(
             bgcolor=CARD, border=hairline(ACCENT if d["pact"] else LINE), border_radius=16, padding=16,
             on_click=setter("pact", not d["pact"]),
@@ -2231,10 +2348,11 @@ async def main(page: ft.Page, cloud=None):
 
     async def finish_login():
         state["overlay"] = None
-        state["feed"] = state["meetups"] = state["board"] = None
+        state["feed"] = state["meetups"] = state["board"] = state["friends"] = None
         render()
         await refresh_tab(state["tab"])
         render(keep_scroll=True)
+        await accept_pending_friend()
 
     async def sign_out(e=None):
         cloud.sign_out()
@@ -2329,6 +2447,136 @@ async def main(page: ft.Page, cloud=None):
                     ft.IconButton(icon=ft.Icons.CLOSE, icon_color=INK, tooltip="關閉", on_click=lambda e: close_overlay())])),
                 ft.Container(padding=pad(PAD, 8, PAD, 0), content=ft.Column(body, spacing=20))]
 
+    # ==================== 社群：好友 ====================
+    def friend_link(code: str) -> str:
+        """好友連結：朋友打開就會成為好友。網址的 # 後面是 App 裡的頁面（GitHub Pages 用 hash 路由）。"""
+        return f"{(SITE_URL or '').rstrip('/')}/#/friend/{code}"
+
+    def friend_code_in(route: str | None) -> str | None:
+        m = re.search(r"friend/([A-Za-z0-9]{4,12})", route or "")
+        return m.group(1).upper() if m else None
+
+    async def load_friends():
+        if not ready():
+            return
+        f = {"code": "", "list": [], "requests": []}
+        ok, code = await cloud_call(cloud.my_friend_code(), quiet=True)
+        f["code"] = code if ok else ""
+        ok, rows = await cloud_call(cloud.my_friends(), quiet=True)
+        f["list"] = rows if ok else []
+        ok, rows = await cloud_call(cloud.friend_requests(), quiet=True)
+        f["requests"] = rows if ok else []
+        state["friends"] = f
+
+    def friend_ids() -> set:
+        return {x["user_id"] for x in (state["friends"] or {}).get("list", [])}
+
+    async def accept_pending_friend():
+        """有人用好友連結打開 App：加入後自動成為好友。"""
+        code = state["pending_friend"]
+        if not code or not cloud.enabled:
+            return
+        if not ready():
+            if not (state["overlay"] and state["overlay"]["kind"] == "login"):
+                open_overlay("login")
+            toast("先取個暱稱加入，就會自動和朋友成為好友")
+            return
+        state["pending_friend"] = None
+        ok, res = await cloud_call(cloud.add_friend_by_code(code))
+        if ok:
+            added, info = res
+            toast(f"你和 {info} 成為好友了！之後可以開只給好友看的飯局" if added else info)
+            state["friends"] = state["meetups"] = None
+            await refresh_tab(state["tab"])
+            render(keep_scroll=True)
+
+    async def open_friends(e=None):
+        open_overlay("friends")
+        await load_friends()
+        if state["overlay"] and state["overlay"]["kind"] == "friends":
+            render(keep_scroll=True)
+
+    async def copy_text(text: str):
+        try:
+            await ft.Clipboard().set(text)
+        except Exception:
+            try:
+                page.set_clipboard(text)
+            except Exception:
+                toast("長按上面的連結就能複製")
+                return
+        toast("連結已複製，貼給朋友就好")
+
+    def friends_screen(cw: int):
+        f = state["friends"]
+        back = ft.Row([ft.IconButton(icon=ft.Icons.ARROW_BACK_IOS_NEW, icon_color=INK, icon_size=20, tooltip="返回",
+                                     on_click=lambda e: close_overlay())])
+        body = [caps("FRIENDS · 只跟熟人吃"), serif("好友", 30, weight=ft.FontWeight.W_600, height=1.2),
+                sans("開飯局時可以選「只給好友看」，只有好友看得到、加得進來。"
+                     "把你的好友連結傳給朋友，對方打開就會成為好友；見面時也可以讓對方用手機相機掃 QR code。",
+                     14, BODY, height=1.8)]
+        if f is None:
+            body.append(sans("載入中…", 13, MUTED))
+        else:
+            if f["code"]:
+                link = friend_link(f["code"])
+
+                async def copy(e):
+                    await copy_text(link)
+
+                share_text = f"加我好友，一起用 Table 席間約吃飯：{link}"
+                body.append(ft.Container(
+                    **GLASS_KW, border_radius=22, padding=20,
+                    content=ft.Column(spacing=14, horizontal_alignment=ft.CrossAxisAlignment.CENTER, controls=[
+                        caps("MY FRIEND LINK · 我的好友連結"),
+                        ft.Image(src=qr_png(link, scale=6), width=200, height=200),
+                        ft.Text(link, size=12, color=MUTED, selectable=True, text_align=ft.TextAlign.CENTER),
+                        ft.Row([pill("複製連結", copy, filled=False, expand=True),
+                                link_button("用 LINE 傳", "https://line.me/R/share?text=" + urllib.parse.quote(share_text),
+                                            expand=True)], spacing=10),
+                    ])))
+            if f["requests"]:
+                rows = []
+                for q in f["requests"]:
+                    def answer(uid, accept):
+                        async def handler(e):
+                            ok, _ = await cloud_call(cloud.respond_friend(uid, accept))
+                            if ok:
+                                toast("成為好友了！" if accept else "已略過")
+                                await load_friends()
+                                render(keep_scroll=True)
+                        return handler
+                    rows.append(ft.Row(spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER, controls=[
+                        avatar((q["display_name"] or "?")[:1], 32),
+                        ft.Column(spacing=1, expand=True, controls=[sans(q["display_name"], 14, weight=ft.FontWeight.W_500),
+                                                                    sans(q.get("dept") or "一起吃過飯局", 11, MUTED)]),
+                        pill("接受", answer(q["user_id"], True), accent=True),
+                        ft.TextButton(content=sans("略過", 12, MUTED), on_click=answer(q["user_id"], False))]))
+                body.append(ft.Column([section_label("REQUESTS", f"{len(f['requests'])} 個好友邀請"), *rows], spacing=10))
+            rows = []
+            for x in f["list"]:
+                def remove(uid, name):
+                    async def handler(e):
+                        ok, _ = await cloud_call(cloud.remove_friend(uid))
+                        if ok:
+                            toast(f"已和 {name} 解除好友")
+                            await load_friends()
+                            render(keep_scroll=True)
+                    return handler
+                sub = " · ".join(v for v in [x.get("dept", ""), x.get("title", "")] if v)
+                rows.append(ft.Row(spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER, controls=[
+                    avatar((x["display_name"] or "?")[:1], 32),
+                    ft.Column(spacing=1, expand=True, controls=[sans(x["display_name"], 14, weight=ft.FontWeight.W_500),
+                                                                sans(sub, 11, MUTED)]),
+                    ft.TextButton(content=sans("解除", 12, MUTED), on_click=remove(x["user_id"], x["display_name"]))]))
+            body.append(ft.Column([section_label("FRIENDS", f"{len(f['list'])} 位好友"),
+                                   *(rows or [sans("還沒有好友。把上面的連結傳給一起吃飯的朋友吧。", 13, MUTED)])],
+                                  spacing=10))
+            body.append(sans("好友跟著這支手機的帳號；清除瀏覽紀錄或換手機會看不到原本的好友。"
+                             "一起吃過公開飯局的人，也可以在飯局頁按「加好友」，對方同意才會成立。", 11, MUTED, height=1.7))
+        return [ft.Container(padding=pad(8, 8, 8, 0), content=back),
+                ft.Container(padding=pad(PAD, 4, PAD, 0), content=ft.Column(body, spacing=20))]
+
     def profile_card():
         if not ready():
             return login_card("加入台大的餐桌", "加入後可以幫愛店助力、看大家今天吃什麼、找人一起吃飯。")
@@ -2342,6 +2590,7 @@ async def main(page: ft.Page, cloud=None):
             ft.Row(spacing=14, vertical_alignment=ft.CrossAxisAlignment.CENTER, controls=[
                 avatar(p["display_name"][:1], 56, "#E8E1D6"), ft.Column(info, spacing=4, expand=True)]),
             ft.Row(spacing=0, wrap=True, controls=[
+                ft.TextButton(content=sans("好友", 13, INK), on_click=open_friends),
                 ft.TextButton(content=sans("吃貨派別測驗", 13, INK), on_click=lambda e: open_overlay("fun")),
                 ft.TextButton(content=sans("改暱稱", 13, MUTED), on_click=lambda e: open_overlay("login")),
                 ft.TextButton(content=sans("刪除我的社群資料", 13, MUTED), on_click=confirm_delete_data)]),
@@ -2357,8 +2606,9 @@ async def main(page: ft.Page, cloud=None):
                 render(keep_scroll=True)
             return handler
 
-        head = ft.Row(alignment=ft.MainAxisAlignment.SPACE_BETWEEN, vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        head = ft.Row(vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=12,
                       controls=[section_label("RANKING", "愛店排行榜"),
+                                ft.Container(expand=True, height=1, bgcolor=LINE),
                                 ft.Row([chip("本週", state["board_days"] == 7, set_days(7)),
                                         chip("總榜", state["board_days"] == 0, set_days(0))], spacing=6)])
         out = [head]
@@ -2373,12 +2623,15 @@ async def main(page: ft.Page, cloud=None):
         for i, row in enumerate(rows or []):
             r = by_id.get(row["restaurant_id"])
             out.append(ft.Container(
-                border=bottom_line(), padding=pad(0, 10, 0, 10),
+                **GLASS_KW, border_radius=34, padding=pad(18, 12, 10, 12),
                 on_click=(lambda e, r=r: open_overlay("place", restaurant=r)) if r else None,
-                content=ft.Row(spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER, controls=[
-                    ft.Container(width=30, content=serif(f"{i + 1:02d}", 18, ACCENT if i < 3 else MUTED, height=1.0)),
-                    ft.Column(spacing=2, expand=True, controls=[
-                        serif(row["restaurant_name"], 17, max_lines=1, height=1.3),
+                content=ft.Row(spacing=14, vertical_alignment=ft.CrossAxisAlignment.CENTER, controls=[
+                    ft.Container(width=40, content=ft.Text(f"{i + 1:02d}", size=30, color=MUTED, italic=True,
+                                                           font_family=serif_family)),
+                    ft.Container(width=1, height=44, bgcolor=LINE),
+                    thumb(row["restaurant_id"], row["restaurant_name"], 64),
+                    ft.Column(spacing=4, expand=True, controls=[
+                        serif(row["restaurant_name"], 18, max_lines=1, height=1.3),
                         sans(f"{row.get('area', '')} · {row['boosters']} 人助力", 11, MUTED, spacing=0.3)]),
                     boost_button(row["restaurant_id"], row["restaurant_name"], row.get("area", "")),
                 ])))
@@ -2427,8 +2680,8 @@ async def main(page: ft.Page, cloud=None):
 
     def glass(content, height=64, padding=None):
         return ft.Container(
-            height=height, border_radius=height / 2, bgcolor=ft.Colors.with_opacity(0.74, CARD),
-            blur=ft.Blur(22, 22), border=hairline(ft.Colors.with_opacity(0.95, LINE)), padding=padding,
+            height=height, border_radius=height / 2, bgcolor=ft.Colors.with_opacity(0.62, "#FFFFFF"),
+            blur=ft.Blur(22, 22), border=border_all(1, ft.Colors.with_opacity(0.95, "#FFFFFF")), padding=padding,
             shadow=ft.BoxShadow(blur_radius=30, color=ft.Colors.with_opacity(0.08, INK), offset=ft.Offset(0, 10)),
             content=content,
         )
@@ -2444,6 +2697,18 @@ async def main(page: ft.Page, cloud=None):
                     ov.get("meetup_id"), ov.get("step"), len(ov.get("answers", [])))
         return ("tab", state["tab"])
 
+    def backdrop(cw: int):
+        """奶茶色漸層＋兩道淡淡的弧線，讓毛玻璃有東西可以透。"""
+        return [
+            ft.Container(left=0, top=0, right=0, bottom=0, gradient=ft.LinearGradient(
+                begin=ft.Alignment(-1, -1), end=ft.Alignment(1, 1), colors=[BG_TOP, BG, BG_BOTTOM])),
+            ft.Container(left=-cw * 0.45, top=-cw * 0.55, width=cw * 1.1, height=cw * 1.1, border_radius=cw * 0.55,
+                         bgcolor=ft.Colors.with_opacity(0.35, "#FFFFFF"),
+                         border=border_all(1, ft.Colors.with_opacity(0.6, "#FFFFFF"))),
+            ft.Container(right=-cw * 0.6, bottom=cw * 0.15, width=cw * 1.2, height=cw * 1.2, border_radius=cw * 0.6,
+                         border=border_all(1, ft.Colors.with_opacity(0.55, "#FFFFFF"))),
+        ]
+
     def render(keep_scroll: bool = False):
         nonlocal body_list
         cw = content_width()
@@ -2452,7 +2717,8 @@ async def main(page: ft.Page, cloud=None):
         if ov:
             kind = ov["kind"]
             screens = {"post": detail_screen, "record": record_screen, "place": place_screen, "quiz": quiz_screen,
-                       "login": login_screen, "fun": fun_screen, "meetup": meetup_screen, "newmeet": newmeet_screen}
+                       "login": login_screen, "fun": fun_screen, "meetup": meetup_screen, "newmeet": newmeet_screen,
+                       "friends": friends_screen}
             controls = screens[kind](cw)
         else:
             tab = state["tab"]
@@ -2465,7 +2731,7 @@ async def main(page: ft.Page, cloud=None):
         current_key["value"] = key
         body_list.controls = controls
 
-        layers = [ft.Container(left=0, top=0, right=0, bottom=0, content=body_list)]
+        layers = [*backdrop(cw), ft.Container(left=0, top=0, right=0, bottom=0, content=body_list)]
         if ov and ov["kind"] == "post":
             layers.append(ft.Container(left=PAD, right=PAD, bottom=22,
                                        content=glass(detail_bar(ov["post"]), padding=pad(0, 0, 8, 0))))
@@ -2476,12 +2742,13 @@ async def main(page: ft.Page, cloud=None):
             layers.append(ft.Container(left=PAD, right=PAD, bottom=22,
                                        content=glass(ft.Row([nav_item(i) for i in NAV], spacing=0))))
             layers.append(ft.Container(
-                left=(cw - 56) / 2, bottom=22 + 64 - 56 + 16, width=56, height=56, border_radius=28,
-                bgcolor=INK, border=border_all(4, BG),
-                shadow=ft.BoxShadow(blur_radius=20, color=ft.Colors.with_opacity(0.22, INK), offset=ft.Offset(0, 8)),
+                left=(cw - 64) / 2, bottom=22 + 22, width=64, height=64, border_radius=32,
+                gradient=ft.LinearGradient(begin=ft.Alignment(-1, -1), end=ft.Alignment(1, 1), colors=[OLIVE, OLIVE_DARK]),
+                border=border_all(4, ft.Colors.with_opacity(0.85, "#FFFFFF")),
+                shadow=ft.BoxShadow(blur_radius=22, color=ft.Colors.with_opacity(0.30, OLIVE_DARK), offset=ft.Offset(0, 8)),
                 alignment=ft.Alignment.CENTER, tooltip="記錄這一餐", ink=True,
                 on_click=lambda e: open_overlay("record"),
-                content=ft.Icon(ft.Icons.ADD, size=24, color=BG),
+                content=ft.Icon(ft.Icons.ADD, size=28, color=ON_OLIVE),
             ))
         frame.content = ft.Stack(layers)
         page.update()
@@ -2499,6 +2766,18 @@ async def main(page: ft.Page, cloud=None):
         content=ft.Row(expand=True, spacing=0, alignment=ft.MainAxisAlignment.CENTER,
                        vertical_alignment=ft.CrossAxisAlignment.STRETCH, controls=[frame]),
     ))
+    async def on_route_change(e=None):
+        code = friend_code_in(getattr(page, "route", ""))
+        if code:
+            state["pending_friend"] = code
+            await accept_pending_friend()
+
+    try:
+        page.on_route_change = on_route_change
+    except Exception:
+        pass
+    state["pending_friend"] = friend_code_in(getattr(page, "route", ""))     # 用好友連結打開的
+
     render()
     if cloud.enabled and cloud.logged_in:                  # 上次登入過：自動接上
         ok, prof = await cloud_call(cloud.me(), quiet=True)
@@ -2506,6 +2785,7 @@ async def main(page: ft.Page, cloud=None):
         if state["profile"]:
             await refresh_tab(state["tab"])
         render(keep_scroll=True)
+    await accept_pending_friend()
 
 
 if __name__ == "__main__":

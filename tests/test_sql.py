@@ -126,3 +126,41 @@ def test_title_and_delete_my_data(db):
     as_user(db["yu"], "select delete_my_data();")
     assert as_user(db["yu"], "select me() is null;") == "t"
     assert psql(f"select count(*) from boosts where user_id = '{db['yu']}';") == "0"
+
+
+def new_user(name):
+    uid = str(uuid.uuid4())
+    psql(f"insert into auth.users (id) values ('{uid}');")
+    as_user(uid, f"select setup_profile('{name}', '');")
+    return uid
+
+
+def test_friends_by_link_and_friends_only_meetups(db):
+    db["yu"], db["max"], db["leo"] = new_user("小魚"), new_user("Max"), new_user("Leo")
+    code = as_user(db["yu"], "select my_friend_code();")
+    assert len(code) == 8 and as_user(db["yu"], "select my_friend_code();") == code      # 固定不變
+    assert as_user(db["yu"], f"select add_friend_by_code('{code}')->>'reason';") == "這是你自己的好友連結"
+    assert as_user(db["max"], "select add_friend_by_code('NOPE1234')->>'ok';") == "false"
+    out = as_user(db["max"], f"select add_friend_by_code('{code.lower()}')::text;")      # 大小寫都可以
+    assert '"ok" : true' in out and "小魚" in out
+    assert as_user(db["yu"], "select string_agg(display_name, ',') from my_friends();") == "Max"
+
+    mid = as_user(db["yu"], "select create_meetup('osm7', '築本屋', '公館', now() + interval '1 day', 4, '', false, true);")
+    assert as_user(db["max"], f"select friends_only, host_is_friend from open_meetups() where id = {mid};") == "t|t"
+    assert as_user(db["leo"], f"select count(*) from open_meetups() where id = {mid};") == "0"   # 不是好友看不到
+    assert as_user(db["leo"], f"select join_meetup({mid})->>'reason';") == "這是好友限定的飯局"
+    assert as_user(db["max"], f"select join_meetup({mid})->>'ok';") == "true"
+    assert as_user(db["leo"], f"select count(*) from feed(50) where ref_id = {mid};") == "0"     # 不上校園動態
+
+
+def test_friend_request_only_after_eating_together(db):
+    assert as_user(db["leo"], f"select request_friend('{db['max']}')->>'reason';") == "一起吃過飯局才能加好友"
+    mid = as_user(db["leo"], "select create_meetup('osm8', '好呷拉麵', '公館', now() + interval '1 day', 4, '');")
+    as_user(db["max"], f"select join_meetup({mid});")
+    assert as_user(db["leo"], f"select request_friend('{db['max']}')->>'reason';") == "已送出邀請"
+    assert as_user(db["max"], "select display_name from friend_requests_to_me();") == "Leo"
+    as_user(db["max"], f"select respond_friend('{db['leo']}', true);")
+    assert as_user(db["leo"], "select count(*) from my_friends();") == "1"
+    assert as_user(db["max"], "select count(*) from friend_requests_to_me();") == "0"
+    as_user(db["max"], f"select block_user('{db['leo']}');")                          # 封鎖 = 解除好友
+    assert as_user(db["leo"], "select count(*) from my_friends();") == "0"

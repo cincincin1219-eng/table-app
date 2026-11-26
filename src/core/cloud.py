@@ -270,10 +270,11 @@ class Cloud:
         return await self.rpc("feed", p_limit=limit) or []
 
     async def create_meetup(self, rid: str, name: str, area: str, starts_at: datetime | None,
-                            capacity: int, theme: str, radar: bool) -> int:
+                            capacity: int, theme: str, radar: bool, friends_only: bool = False) -> int:
         return await self.rpc("create_meetup", p_restaurant_id=rid, p_name=name, p_area=area,
                               p_starts_at=from_taipei(starts_at) if starts_at else None,
-                              p_capacity=capacity, p_theme=theme, p_radar=radar)
+                              p_capacity=capacity, p_theme=theme, p_radar=radar,
+                              p_friends_only=friends_only)
 
     async def join_meetup(self, meetup_id: int) -> tuple[bool, str]:
         res = await self.rpc("join_meetup", p_id=meetup_id) or {}
@@ -293,3 +294,28 @@ class Cloud:
 
     async def block_user(self, user_id: str):
         return await self.rpc("block_user", p_user=user_id)
+
+    # ---- 好友 ----
+    async def my_friend_code(self) -> str:
+        return await self.rpc("my_friend_code") or ""
+
+    async def add_friend_by_code(self, code: str) -> tuple[bool, str]:
+        """成功時第二個值是對方暱稱，失敗時是原因。"""
+        res = await self.rpc("add_friend_by_code", p_code=code) or {}
+        return bool(res.get("ok")), (res.get("name") or "") if res.get("ok") else res.get("reason", "")
+
+    async def request_friend(self, user_id: str) -> tuple[bool, str]:
+        res = await self.rpc("request_friend", p_user=user_id) or {}
+        return bool(res.get("ok")), res.get("reason", "")
+
+    async def friend_requests(self) -> list[dict]:
+        return await self.rpc("friend_requests_to_me") or []
+
+    async def respond_friend(self, user_id: str, accept: bool):
+        return await self.rpc("respond_friend", p_user=user_id, p_accept=accept)
+
+    async def my_friends(self) -> list[dict]:
+        return await self.rpc("my_friends") or []
+
+    async def remove_friend(self, user_id: str):
+        return await self.rpc("remove_friend", p_user=user_id)

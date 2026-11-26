@@ -123,12 +123,35 @@ create table if not exists blocks (
   primary key (blocker_id, blocked_id)
 );
 
+-- 好友（V1.1）：a < b 存一筆就代表兩人互為好友
+create table if not exists friendships (
+  a          uuid not null references profiles(id) on delete cascade,
+  b          uuid not null references profiles(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  primary key (a, b),
+  check (a < b)
+);
+
+-- 好友邀請：只有一起吃過飯局的人才能互相邀請，避免被陌生人找上
+create table if not exists friend_requests (
+  from_id    uuid not null references profiles(id) on delete cascade,
+  to_id      uuid not null references profiles(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  primary key (from_id, to_id)
+);
+
+-- 舊資料庫升級用：重複執行也不會出錯
+alter table profiles add column if not exists friend_code text unique;
+alter table meetups add column if not exists visibility text not null default 'public'
+  check (visibility in ('public', 'friends'));
+
 -- 資料表只能透過函式存取
 do $$
 declare t text;
 begin
   foreach t in array array['circles','allowed_emails','profiles','boosts','posts','reactions',
-                           'meetups','meetup_members','activities','reports','blocks'] loop
+                           'meetups','meetup_members','activities','reports','blocks',
+                           'friendships','friend_requests'] loop
     execute format('alter table %I enable row level security', t);
     execute format('revoke all on %I from anon, authenticated', t);
   end loop;
@@ -160,6 +183,17 @@ create or replace function is_blocked_between(a uuid, b uuid) returns boolean
 language sql stable security definer set search_path = public as $$
   select exists (select 1 from blocks
                  where (blocker_id = a and blocked_id = b) or (blocker_id = b and blocked_id = a));
+$$;
+
+create or replace function are_friends(x uuid, y uuid) returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (select 1 from friendships where a = least(x, y) and b = greatest(x, y));
+$$;
+
+create or replace function make_friends(x uuid, y uuid) returns void
+language sql security definer set search_path = public as $$
+  insert into friendships (a, b) values (least(x, y), greatest(x, y)) on conflict do nothing;
+  delete from friend_requests where (from_id = x and to_id = y) or (from_id = y and to_id = x);
 $$;
 
 -- ============ 帳號 ============
@@ -302,9 +336,11 @@ language sql stable security definer set search_path = public as $$
 $$;
 
 -- ============ 吃飯組局與雷達 ============
+drop function if exists create_meetup(text, text, text, timestamptz, int, text, boolean);
 create or replace function create_meetup(p_restaurant_id text, p_name text, p_area text,
                                          p_starts_at timestamptz, p_capacity int, p_theme text,
-                                         p_radar boolean default false) returns bigint
+                                         p_radar boolean default false,
+                                         p_friends_only boolean default false) returns bigint
 language plpgsql security definer set search_path = public as $$
 declare c int := my_circle(); mid bigint; s timestamptz; e timestamptz;
 begin
@@ -320,11 +356,13 @@ begin
     s := p_starts_at; e := p_starts_at + interval '2 hours';
   end if;
   insert into meetups (circle_id, host_id, kind, restaurant_id, restaurant_name, area,
-                       starts_at, expires_at, capacity, theme)
+                       starts_at, expires_at, capacity, theme, visibility)
   values (c, auth.uid(), case when p_radar then 'radar' else 'meal' end, coalesce(p_restaurant_id, ''),
-          p_name, coalesce(p_area, ''), s, e, p_capacity, coalesce(p_theme, ''))
+          p_name, coalesce(p_area, ''), s, e, p_capacity, coalesce(p_theme, ''),
+          case when p_friends_only then 'friends' else 'public' end)
   returning id into mid;
   insert into meetup_members (meetup_id, user_id) values (mid, auth.uid());
+  if p_friends_only then return mid; end if;          -- 好友限定的飯局不出現在校園動態
   insert into activities (circle_id, actor_id, verb, restaurant_id, restaurant_name, area, ref_id, extra)
   values (c, auth.uid(), case when p_radar then 'radar' else 'meetup' end, coalesce(p_restaurant_id, ''),
           p_name, coalesce(p_area, ''), mid, coalesce(p_theme, ''));
@@ -346,6 +384,9 @@ begin
   if exists (select 1 from meetup_members where meetup_id = p_id and user_id = auth.uid()) then
     return json_build_object('ok', true, 'reason', '');
   end if;
+  if m.visibility = 'friends' and not are_friends(auth.uid(), m.host_id) then
+    return json_build_object('ok', false, 'reason', '這是好友限定的飯局');
+  end if;
   select count(*) into n from meetup_members where meetup_id = p_id;
   if n >= m.capacity then return json_build_object('ok', false, 'reason', '人數已滿'); end if;
   insert into meetup_members (meetup_id, user_id) values (p_id, auth.uid());
@@ -363,11 +404,12 @@ begin
 end $$;
 
 -- 列出圈子裡還沒結束的飯局，含「和我的共同點」
+drop function if exists open_meetups();
 create or replace function open_meetups()
 returns table (id bigint, kind text, host_id uuid, host_name text, restaurant_id text,
                restaurant_name text, area text, starts_at timestamptz, expires_at timestamptz,
                capacity int, theme text, member_names text[], joined boolean, mine boolean,
-               shared_places text[], same_dept int)
+               shared_places text[], same_dept int, friends_only boolean, host_is_friend boolean)
 language sql stable security definer set search_path = public as $$
   select m.id, m.kind, m.host_id, h.display_name, m.restaurant_id, m.restaurant_name, m.area,
          m.starts_at, m.expires_at, m.capacity, m.theme,
@@ -384,10 +426,14 @@ language sql stable security definer set search_path = public as $$
              limit 3) x), '{}'),
          (select count(*)::int from meetup_members mm join profiles p on p.id = mm.user_id
             where mm.meetup_id = m.id and p.id <> auth.uid() and p.dept <> ''
-              and p.dept = (select dept from profiles where id = auth.uid()))
+              and p.dept = (select dept from profiles where id = auth.uid())),
+         m.visibility = 'friends',
+         are_friends(auth.uid(), m.host_id)
   from meetups m join profiles h on h.id = m.host_id
   where m.circle_id = my_circle() and m.status = 'open' and m.expires_at > now()
     and not is_blocked_between(auth.uid(), m.host_id)
+    and (m.visibility = 'public' or m.host_id = auth.uid() or are_friends(auth.uid(), m.host_id)
+         or exists (select 1 from meetup_members mm where mm.meetup_id = m.id and mm.user_id = auth.uid()))
   order by m.kind = 'radar' desc, m.starts_at;
 $$;
 
@@ -414,6 +460,96 @@ language sql security definer set search_path = public as $$
   insert into blocks (blocker_id, blocked_id)
   select auth.uid(), p_user where p_user <> auth.uid() and my_circle() is not null
   on conflict do nothing;
+  delete from friendships where a = least(auth.uid(), p_user) and b = greatest(auth.uid(), p_user);
+  delete from friend_requests where (from_id = auth.uid() and to_id = p_user)
+                                 or (from_id = p_user and to_id = auth.uid());
+$$;
+
+-- ============ 好友 ============
+-- 我的好友碼（第一次用到時才產生）：放進好友連結與 QR code
+create or replace function my_friend_code() returns text
+language plpgsql security definer set search_path = public as $$
+declare code text;
+begin
+  perform my_circle();
+  select friend_code into code from profiles where id = auth.uid();
+  while code is null loop
+    code := upper(substr(md5(random()::text || clock_timestamp()::text), 1, 8));
+    begin
+      update profiles set friend_code = code where id = auth.uid();
+    exception when unique_violation then
+      code := null;
+    end;
+  end loop;
+  return code;
+end $$;
+
+-- 打開別人的好友連結 = 直接成為好友（連結是對方自己分享的）
+create or replace function add_friend_by_code(p_code text) returns json
+language plpgsql security definer set search_path = public as $$
+declare c int := my_circle(); other profiles%rowtype;
+begin
+  select * into other from profiles where friend_code = upper(trim(coalesce(p_code, ''))) and circle_id = c;
+  if other.id is null then return json_build_object('ok', false, 'reason', '這個好友連結無效'); end if;
+  if other.id = auth.uid() then return json_build_object('ok', false, 'reason', '這是你自己的好友連結'); end if;
+  if is_blocked_between(auth.uid(), other.id) then
+    return json_build_object('ok', false, 'reason', '無法加這位好友');
+  end if;
+  perform make_friends(auth.uid(), other.id);
+  return json_build_object('ok', true, 'reason', '', 'name', other.display_name);
+end $$;
+
+-- 在飯局成員名單按「加好友」：只能邀一起吃過飯局的人；對方也邀過我就直接成為好友
+create or replace function request_friend(p_user uuid) returns json
+language plpgsql security definer set search_path = public as $$
+begin
+  perform my_circle();
+  if p_user = auth.uid() or is_blocked_between(auth.uid(), p_user) then
+    return json_build_object('ok', false, 'reason', '無法加這位好友');
+  end if;
+  if are_friends(auth.uid(), p_user) then return json_build_object('ok', true, 'reason', '已經是好友'); end if;
+  if not exists (select 1 from meetup_members x join meetup_members y on x.meetup_id = y.meetup_id
+                 where x.user_id = auth.uid() and y.user_id = p_user) then
+    return json_build_object('ok', false, 'reason', '一起吃過飯局才能加好友');
+  end if;
+  if exists (select 1 from friend_requests where from_id = p_user and to_id = auth.uid()) then
+    perform make_friends(auth.uid(), p_user);
+    return json_build_object('ok', true, 'reason', '已成為好友');
+  end if;
+  insert into friend_requests (from_id, to_id) values (auth.uid(), p_user) on conflict do nothing;
+  return json_build_object('ok', true, 'reason', '已送出邀請');
+end $$;
+
+create or replace function friend_requests_to_me()
+returns table (user_id uuid, display_name text, dept text)
+language sql stable security definer set search_path = public as $$
+  select p.id, p.display_name, p.dept from friend_requests r join profiles p on p.id = r.from_id
+  where r.to_id = auth.uid() order by r.created_at desc;
+$$;
+
+create or replace function respond_friend(p_user uuid, p_accept boolean) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if not exists (select 1 from friend_requests where from_id = p_user and to_id = auth.uid()) then return; end if;
+  if p_accept then
+    perform make_friends(auth.uid(), p_user);
+  else
+    delete from friend_requests where from_id = p_user and to_id = auth.uid();
+  end if;
+end $$;
+
+create or replace function my_friends()
+returns table (user_id uuid, display_name text, dept text, title text)
+language sql stable security definer set search_path = public as $$
+  select p.id, p.display_name, p.dept, p.title
+  from friendships f join profiles p on p.id = case when f.a = auth.uid() then f.b else f.a end
+  where f.a = auth.uid() or f.b = auth.uid()
+  order by p.display_name;
+$$;
+
+create or replace function remove_friend(p_user uuid) returns void
+language sql security definer set search_path = public as $$
+  delete from friendships where a = least(auth.uid(), p_user) and b = greatest(auth.uid(), p_user);
 $$;
 
 -- ============ 權限：函式只給登入的人用 ============
@@ -424,13 +560,16 @@ begin
     'me()', 'setup_profile(text, text)', 'set_title(text, text)', 'delete_my_data()',
     'boost(text, text, text)', 'my_boosts_today()', 'leaderboard(int, int)',
     'share_post(text, text, text, text, text[], text)', 'toggle_cheer(bigint)',
-    'feed(int, bigint)', 'create_meetup(text, text, text, timestamptz, int, text, boolean)',
+    'feed(int, bigint)', 'create_meetup(text, text, text, timestamptz, int, text, boolean, boolean)',
     'join_meetup(bigint)', 'leave_meetup(bigint)', 'open_meetups()', 'meetup_members_of(bigint)',
-    'report(text, text, text)', 'block_user(uuid)'] loop
+    'report(text, text, text)', 'block_user(uuid)', 'my_friend_code()', 'add_friend_by_code(text)',
+    'request_friend(uuid)', 'friend_requests_to_me()', 'respond_friend(uuid, boolean)', 'my_friends()',
+    'remove_friend(uuid)'] loop
     execute format('revoke all on function %s from public, anon', f);
     execute format('grant execute on function %s to authenticated', f);
   end loop;
-  foreach f in array array['circle_for_email(text)', 'my_circle()', 'is_blocked_between(uuid, uuid)'] loop
+  foreach f in array array['circle_for_email(text)', 'my_circle()', 'is_blocked_between(uuid, uuid)',
+                           'are_friends(uuid, uuid)', 'make_friends(uuid, uuid)'] loop
     execute format('revoke all on function %s from public, anon, authenticated', f);
   end loop;
 end $$;

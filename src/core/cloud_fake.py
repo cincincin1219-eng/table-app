@@ -30,6 +30,9 @@ class FakeCloud:
         self.reports: list[tuple] = []
         self.uploads: dict[str, bytes] = {}
         self.sent_codes: dict[str, str] = {}
+        self.friends: set[frozenset] = set()
+        self.friend_reqs: set[tuple[str, str]] = set()      # (from, to)
+        self.friend_codes: dict[str, str] = {}               # user id → code
         self._ids = itertools.count(1)
 
     # ---------- 帳號 ----------
@@ -194,7 +197,7 @@ class FakeCloud:
                 "expires_at": from_taipei(m["expires_at"]), "capacity": m["capacity"], "theme": m["theme"],
                 "status": m["status"], "count": len(m["members"]), "joined": self.user_id in m["members"]}
 
-    async def create_meetup(self, rid, name, area, starts_at, capacity, theme, radar):
+    async def create_meetup(self, rid, name, area, starts_at, capacity, theme, radar, friends_only=False):
         self._profile()
         now = self._now()
         if sum(1 for m in self.meetups.values() if m["host"] == self.user_id and m["status"] == "open"
@@ -211,8 +214,10 @@ class FakeCloud:
         mid = next(self._ids)
         self.meetups[mid] = {"id": mid, "host": self.user_id, "kind": "radar" if radar else "meal",
                              "rid": rid, "name": name, "area": area, "starts_at": s, "expires_at": e,
-                             "capacity": capacity, "theme": theme, "status": "open", "members": [self.user_id]}
-        self._act("radar" if radar else "meetup", rid, name, area, mid, theme)
+                             "capacity": capacity, "theme": theme, "status": "open", "members": [self.user_id],
+                             "friends_only": friends_only}
+        if not friends_only:                                 # 好友限定的飯局不上校園動態
+            self._act("radar" if radar else "meetup", rid, name, area, mid, theme)
         return mid
 
     async def join_meetup(self, meetup_id):
@@ -226,6 +231,8 @@ class FakeCloud:
             return False, "無法加入這個飯局"
         if self.user_id in m["members"]:
             return True, ""
+        if m.get("friends_only") and not self._are_friends(self.user_id, m["host"]):
+            return False, "這是好友限定的飯局"
         if len(m["members"]) >= m["capacity"]:
             return False, "人數已滿"
         m["members"].append(self.user_id)
@@ -246,6 +253,9 @@ class FakeCloud:
         for m in sorted(self.meetups.values(), key=lambda m: (m["kind"] != "radar", m["starts_at"])):
             if m["status"] != "open" or m["expires_at"] <= self._now() or self._blocked(me, m["host"]):
                 continue
+            if m.get("friends_only") and m["host"] != me and me not in m["members"] \
+                    and not self._are_friends(me, m["host"]):
+                continue
             others = [u for u in m["members"] if u != me]
             shared = sorted({mine_boosts[b["rid"]] for b in self.boosts if b["user"] in others and b["rid"] in mine_boosts})[:3]
             profiles = {u["id"]: u["profile"] for u in self.users.values() if u["profile"]}
@@ -255,7 +265,9 @@ class FakeCloud:
                         "capacity": m["capacity"], "theme": m["theme"],
                         "member_names": [self._name(u) for u in m["members"]], "joined": me in m["members"],
                         "mine": m["host"] == me, "shared_places": shared,
-                        "same_dept": sum(1 for u in others if my_dept and profiles[u]["dept"] == my_dept)})
+                        "same_dept": sum(1 for u in others if my_dept and profiles[u]["dept"] == my_dept),
+                        "friends_only": bool(m.get("friends_only")),
+                        "host_is_friend": self._are_friends(me, m["host"])})
         return out
 
     async def meetup_members(self, meetup_id):
@@ -272,3 +284,76 @@ class FakeCloud:
     async def block_user(self, user_id):
         if user_id != self.user_id:
             self.blocks.add((self.user_id, user_id))
+            self.friends.discard(frozenset((self.user_id, user_id)))
+            self.friend_reqs -= {(self.user_id, user_id), (user_id, self.user_id)}
+
+    # ---------- 好友（規則和 schema.sql 一樣） ----------
+    def _are_friends(self, a, b):
+        return frozenset((a, b)) in self.friends
+
+    def _make_friends(self, a, b):
+        self.friends.add(frozenset((a, b)))
+        self.friend_reqs -= {(a, b), (b, a)}
+
+    async def my_friend_code(self):
+        self._profile()
+        me = self.user_id
+        if me not in self.friend_codes:
+            self.friend_codes[me] = f"F{len(self.friend_codes) + 1:07d}"
+        return self.friend_codes[me]
+
+    async def add_friend_by_code(self, code):
+        self._profile()
+        other = next((u for u, c in self.friend_codes.items() if c == (code or "").strip().upper()), None)
+        if not other:
+            return False, "這個好友連結無效"
+        if other == self.user_id:
+            return False, "這是你自己的好友連結"
+        if self._blocked(self.user_id, other):
+            return False, "無法加這位好友"
+        self._make_friends(self.user_id, other)
+        return True, self._name(other)
+
+    async def request_friend(self, user_id):
+        self._profile()
+        me = self.user_id
+        if user_id == me or self._blocked(me, user_id):
+            return False, "無法加這位好友"
+        if self._are_friends(me, user_id):
+            return True, "已經是好友"
+        if not any(me in m["members"] and user_id in m["members"] for m in self.meetups.values()):
+            return False, "一起吃過飯局才能加好友"
+        if (user_id, me) in self.friend_reqs:
+            self._make_friends(me, user_id)
+            return True, "已成為好友"
+        self.friend_reqs.add((me, user_id))
+        return True, "已送出邀請"
+
+    async def friend_requests(self):
+        profiles = {u["id"]: u["profile"] for u in self.users.values() if u["profile"]}
+        return [{"user_id": f, "display_name": profiles[f]["display_name"], "dept": profiles[f]["dept"]}
+                for f, t in self.friend_reqs if t == self.user_id and f in profiles]
+
+    async def respond_friend(self, user_id, accept):
+        if (user_id, self.user_id) not in self.friend_reqs:
+            return
+        if accept:
+            self._make_friends(self.user_id, user_id)
+        else:
+            self.friend_reqs.discard((user_id, self.user_id))
+
+    async def my_friends(self):
+        me = self.user_id
+        profiles = {u["id"]: u["profile"] for u in self.users.values() if u["profile"]}
+        out = []
+        for pair in self.friends:
+            if me in pair:
+                other = next(iter(pair - {me}))
+                if other in profiles:
+                    p = profiles[other]
+                    out.append({"user_id": other, "display_name": p["display_name"], "dept": p["dept"],
+                                "title": p.get("title", "")})
+        return sorted(out, key=lambda f: f["display_name"])
+
+    async def remove_friend(self, user_id):
+        self.friends.discard(frozenset((self.user_id, user_id)))

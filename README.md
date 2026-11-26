@@ -243,7 +243,12 @@ python3 -m http.server 8000 --directory src/dist
 6. **重新發佈**：`flet publish src/main.py -a assets --distpath dist`，把新的 `src/dist` 拖到 Netlify
    原本那個專案的 **Deploys** 頁面，網址不會變。
 
-注意：匿名帳號清除瀏覽器資料或換手機就會變成新帳號。之後如果要改回台大信箱登入，
+**好友與好友限定飯局**（訪談後新增）：「我的 → 好友」有每個人自己的好友連結和 QR code，
+朋友打開連結（或用手機相機掃 QR code）就直接成為好友；一起吃過公開飯局的人也能在飯局頁按「加好友」，
+對方同意才成立。開飯局時選「只給好友」，就只有好友看得到、加得進來，也不會出現在校園動態。
+好友連結的網址來自 `src/config.py` 的 `SITE_URL`，要填成正式網址（例如 GitHub Pages 的網址）。
+
+注意：匿名帳號清除瀏覽器資料或換手機就會變成新帳號（好友也會跟著不見）。之後如果要改回台大信箱登入，
 `core/cloud.py` 裡的信箱驗證碼功能還留著，需要另外接寄信服務（SMTP）。
 
 資料庫規則有自動測試：裝了 Postgres 的電腦可以執行 `TABLE_SQL_TESTS=1 pytest tests/test_sql.py`。

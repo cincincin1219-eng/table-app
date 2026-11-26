@@ -169,3 +169,41 @@ def test_anonymous_join():
     assert c.logged_in and run(c.setup_profile("安安", ""))["display_name"] == "安安"
     with pytest.raises(CloudError, match="匿名登入"):
         run(Cloud("https://x.supabase.co", "ANON", http=http).sign_in_anonymously())
+
+
+def test_fake_cloud_friends():
+    now = datetime(2026, 11, 25, 12, 0)
+    fc = FakeCloud(now=lambda: now)
+
+    async def login(email, name):
+        fc.sign_out()
+        await fc.send_code(email)
+        await fc.verify_code(email, "123456")
+        if not await fc.me():
+            await fc.setup_profile(name, "")
+        return fc.user_id
+
+    async def scenario():
+        an = await login("f1@ntu.edu.tw", "安安")
+        code = await fc.my_friend_code()
+        mid = await fc.create_meetup("osm1", "築本屋", "公館", now + timedelta(hours=3), 4, "", False, True)
+        await login("f2@ntu.edu.tw", "小魚")
+        assert not [m for m in await fc.open_meetups() if m["id"] == mid]          # 還不是好友：看不到
+        assert await fc.join_meetup(mid) == (False, "這是好友限定的飯局")
+        assert await fc.add_friend_by_code(code.lower()) == (True, "安安")
+        rows = [m for m in await fc.open_meetups() if m["id"] == mid]
+        assert rows[0]["friends_only"] and rows[0]["host_is_friend"]
+        assert await fc.join_meetup(mid) == (True, "")
+        assert all(a.get("ref_id") != mid for a in await fc.feed())                  # 不上校園動態
+        leo = await login("f3@ntu.edu.tw", "Leo")
+        assert await fc.request_friend(an) == (False, "一起吃過飯局才能加好友")
+        pub = await fc.create_meetup("osm2", "好呷拉麵", "公館", now + timedelta(hours=2), 4, "", False)
+        await login("f1@ntu.edu.tw", "安安")
+        await fc.join_meetup(pub)
+        assert await fc.request_friend(leo) == (True, "已送出邀請")
+        await login("f3@ntu.edu.tw", "Leo")
+        assert [r["display_name"] for r in await fc.friend_requests()] == ["安安"]
+        await fc.respond_friend(an, True)
+        assert [f["display_name"] for f in await fc.my_friends()] == ["安安"]
+
+    run(scenario())

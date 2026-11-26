@@ -71,3 +71,14 @@ def test_unknown_price_is_not_filtered_by_budget():
     picks = recommend([r], B, Query("general", budget=80, minutes_available=120),
                       datetime(2026, 11, 17, 12, 0))
     assert [p.restaurant.name for p in picks] == [r.name]
+
+
+def test_qr_code_scans():
+    """自己寫的 QR code 產生器：用 OpenCV 掃得出原本的連結（沒裝 OpenCV 就略過）。"""
+    import pytest
+    cv2 = pytest.importorskip("cv2")
+    import numpy as np
+    from core.qr import qr_png
+    for text in ["https://cincincin1219-eng.github.io/table-app/#/friend/AB12CD34", "HELLO", "台大" * 30]:
+        img = cv2.imdecode(np.frombuffer(qr_png(text, scale=6), np.uint8), cv2.IMREAD_GRAYSCALE)
+        assert cv2.QRCodeDetector().detectAndDecode(img)[0] == text

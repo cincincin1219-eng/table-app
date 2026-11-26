@@ -98,12 +98,13 @@ async def join(page, name, dept):
     await click(page, "加入")
 
 
-async def open_app(cloud, session=""):
+async def open_app(cloud, session="", route=""):
     """模擬一支手機打開 App：每支手機有自己的儲存空間（裡面記著自己的帳號）。"""
     ft._PREFS.clear()
     if session:
         ft._PREFS["table.session"] = session
     page = ft.Page()
+    page.route = route
     await app.main(page, cloud=cloud)
     return page
 
@@ -120,6 +121,7 @@ def test_two_students_meet_up():
         assert "安安" in all_text(page) and any("歡迎加入" in t for t in toasts(page))
         an_session = cloud.dump_session()
         await click(page, "探索")
+        await click(page, "公館捷運站")            # 店變多了，從公館出發大狗麵線才排得進前 20 家
         await click(page, "大狗麵線")
         await click(page, "助力")
         assert any("助力 +1" in t for t in toasts(page))
@@ -187,5 +189,64 @@ def test_without_cloud_config_app_still_works():
         assert "社群功能還沒開通" in all_text(page)
         await click(page, "探索")
         assert "社群功能還沒開通" in all_text(page)
+
+    asyncio.run(scenario())
+
+
+def test_navigation_uses_shop_name_except_chains():
+    """導航用「店名＋地區」讓 Google 地圖找到正確位置；連鎖店才用座標，避免帶去別家分店。"""
+    import main
+    from core.data import load_restaurants
+    rs = {r.name: r for r in load_restaurants()}
+    url = main.walk_url(rs["築本屋"])
+    assert "travelmode=walking" in url and "%E7%AF%89%E6%9C%AC%E5%B1%8B" in url    # 築本屋
+    assert main.place_query(rs["麥當勞"]).replace(".", "").replace(",", "").isdigit()
+
+
+def test_friend_link_and_friends_only_meetup():
+    """訪談：有人覺得跟陌生人吃飯不自在 → 好友連結＋只給好友看的飯局。"""
+    cloud = FakeCloud()
+
+    async def scenario():
+        page = await open_app(cloud)
+        await join(page, "安安", "資工系")
+        await click(page, "好友")
+        code = await cloud.my_friend_code()
+        link = next(t for t in all_text(page) if "/#/friend/" in t)
+        assert link.endswith(code)
+        assert any(type(c).__name__ == "Image" for c in controls(page))          # QR code
+        an_session = cloud.dump_session()
+
+        # 小魚打開好友連結：先取暱稱，加入後自動成為好友
+        page = await open_app(cloud, route=f"/friend/{code}")
+        assert any("先取個暱稱加入" in t for t in toasts(page))
+        await type_into(page, "暱稱（20 字內）", "小魚")
+        await click(page, "加入")
+        assert any("你和 安安 成為好友了" in t for t in toasts(page))
+        yu_session = cloud.dump_session()
+
+        # 安安開「只給好友」的飯局
+        page = await open_app(cloud, an_session)
+        await click(page, "飯局")
+        await click(page, "開一個飯局")
+        await type_into(page, "店名，從清單裡選一家", "築本屋")
+        await click(page, "只給好友")
+        await click(page, "我同意飯局公約")
+        await click(page, "開團")
+        assert any("只有好友看得到" in t for t in toasts(page))
+
+        # 不是好友的 Leo 看不到
+        page = await open_app(cloud)
+        await join(page, "Leo", "經濟系")
+        await click(page, "飯局")
+        assert "築本屋" not in all_text(page)
+
+        # 小魚看得到、有「好友限定」
+        page = await open_app(cloud, yu_session)
+        await click(page, "飯局")
+        assert "築本屋" in all_text(page) and any("好友限定" in t for t in all_text(page))
+        await click(page, "我的")
+        await click(page, "好友")
+        assert "安安" in all_text(page)
 
     asyncio.run(scenario())
